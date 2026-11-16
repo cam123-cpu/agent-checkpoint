@@ -20,6 +20,7 @@ import io
 import re
 from datetime import date, datetime
 
+from .checks import _norm_name
 from .models import parse_amount
 from .store import Payment, PurchaseOrder, Store, Vendor, norm_account, norm_invoice
 
@@ -30,7 +31,7 @@ FIELDS = {
                   "payee id", "id"],
     "name": ["name", "vendor name", "supplier name", "vendor", "supplier", "payee", "company"],
     "bank_account": ["bank account", "bank_account", "account number", "iban", "account no", "bank account number",
-                     "account", "bank"],
+                     "beneficiary account", "payee account", "pay to account"],
     "email_domains": ["email domains", "email_domains", "email domain", "domain", "domains", "email", "remittance email",
                       "contact email"],
     "created_on": ["created on", "created_on", "created", "date added", "vendor since", "added"],
@@ -40,7 +41,7 @@ FIELDS = {
                "amount due", "net amount"],
     "billed": ["billed", "invoiced", "billed amount", "amount billed"],
     "invoice_number": ["invoice number", "invoice_number", "invoice", "invoice #", "invoice no", "inv", "bill number",
-                       "bill no", "reference", "ref", "document number"],
+                       "bill no", "reference", "ref", "document number", "num", "no"],
     "paid_on": ["paid on", "paid_on", "payment date", "date paid", "paid date", "date", "value date"],
     "po_number": ["po number", "po_number", "po", "purchase order"],
 }
@@ -115,17 +116,48 @@ def parse_date(s: str, order: str = "mdy") -> date:
     raise ValueError(f"can't read the date {s!r}")
 
 
-def _vendor_lookup(store: Store):
-    vendors = store.vendors()
+def _vendor_indexes(vendors: list[Vendor]) -> tuple[dict, dict, dict]:
+    """Id, exact name, and legal-suffix-stripped name. A stripped name shared by two vendors is not used."""
     by_id = {v.vendor_id: v for v in vendors}
-    by_name = {v.name.strip().lower(): v for v in vendors}
+    by_exact: dict[str, Vendor] = {}
+    by_norm: dict[str, Vendor] = {}
+    shared: set[str] = set()
+    for v in vendors:
+        by_exact.setdefault(v.name.strip().lower(), v)
+        key = _norm_name(v.name)
+        if not key:
+            continue
+        if key in by_norm and by_norm[key].vendor_id != v.vendor_id:
+            shared.add(key)
+        else:
+            by_norm[key] = v
+    for key in shared:
+        by_norm.pop(key, None)
+    return by_id, by_exact, by_norm
+
+
+def _match_vendor(by_id, by_exact, by_norm, rec: dict) -> Vendor | None:
+    key = (rec.get("vendor_id") or "").strip()
+    name = (rec.get("name") or "").strip()
+    found = by_id.get(key) or by_exact.get(name.lower()) or by_exact.get(key.lower())
+    if found:
+        return found
+    for candidate in (name, key):
+        norm = _norm_name(candidate)
+        if norm and norm in by_norm:
+            return by_norm[norm]
+    return None
+
+
+def _vendor_lookup(store: Store):
+    by_id, by_exact, by_norm = _vendor_indexes(store.vendors())
 
     def find(rec: dict) -> Vendor:
-        key = rec.get("vendor_id", "").strip()
-        v = by_id.get(key) or by_name.get(rec.get("name", "").strip().lower()) or by_name.get(key.lower())
-        if not v:
-            raise ValueError(f"unknown vendor {key or rec.get('name', '')!r}: import your vendor list first")
-        return v
+        found = _match_vendor(by_id, by_exact, by_norm, rec)
+        if not found:
+            key = (rec.get("vendor_id") or rec.get("name") or "").strip()
+            raise ValueError(f"unknown vendor {key!r}: import your vendor list first")
+        return found
     return find
 
 
@@ -213,15 +245,13 @@ def import_history(store: Store, text: str, date_order: str = "mdy") -> tuple[in
 def read_payment_run(store: Store, text: str) -> tuple[list[dict], list[str]]:
     """The bills about to be paid, as rows the checkpoint can check. Unknown vendors are kept (they're a finding)."""
     rows, errors = [], []
-    vendors = store.vendors()
-    by_id = {v.vendor_id: v for v in vendors}
-    by_name = {v.name.strip().lower(): v for v in vendors}
+    by_id, by_exact, by_norm = _vendor_indexes(store.vendors())
     for n, r in _records(text, ["amount"], ["vendor_id", "name", "invoice_number", "bank_account", "po_number"]):
         try:
             key = (r.get("vendor_id") or r.get("name") or "").strip()
             if not key:
                 raise ValueError("no vendor")
-            v = by_id.get(key) or by_name.get(key.lower()) or by_name.get((r.get("name") or "").strip().lower())
+            v = _match_vendor(by_id, by_exact, by_norm, r)
             rows.append({"line": n, "vendor_id": v.vendor_id if v else key[:64], "vendor_name": v.name if v else key[:200],
                          "invoice_number": (r.get("invoice_number") or "").strip()[:64] or f"line {n}",
                          "amount_cents": parse_amount(r["amount"]), "bank_account": (r.get("bank_account") or "")[:64],

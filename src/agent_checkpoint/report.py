@@ -31,11 +31,20 @@ def shadow_report(ledger, since: str = "", until: str = "") -> dict:
         (blocked if b["verdict"] == "block" else paused).append(item)
     key = lambda i: (-i["risk"], i["on"])  # noqa: E731
     money_moves = ("pay", "refund")
+    runs = []
+    for e in ledger.entries("payment_run_checked"):
+        b = e["body"]
+        when = e["at"][:10]
+        if (since and when < since) or (until and when > until):
+            continue
+        runs.append({"at": e["at"], "by": b.get("by", ""), "file_sha256": b.get("file_sha256", ""),
+                     "summary": b.get("summary", {}), "lines": b.get("lines", []), "ledger_seq": e["seq"]})
     return {
         "actions_checked": total, "by_agent": dict(by_agent),
         "would_block": sorted(blocked, key=key), "would_pause": sorted(paused, key=key),
         "blocked_money_cents": sum(i["amount_cents"] for i in blocked if i["action"] in money_moves),
         "paused_money_cents": sum(i["amount_cents"] for i in paused if i["action"] in money_moves),
+        "payment_runs": runs,
     }
 
 
@@ -54,5 +63,19 @@ def render_text(rep: dict, title: str = "Shadow-mode report") -> str:
             lines.append(f"  [{i['risk']:>3}] {i['on']}  {i['action']}{amt} → {i['vendor']}  "
                          f"(agent {i['agent']}, ledger #{i['ledger_seq']})")
             lines.extend(f"        - {r}" for r in i["reasons"])
+        lines.append("")
+    for run in rep.get("payment_runs", []):
+        summary = run.get("summary") or {}
+        ready = summary.get("go", {}).get("count", 0)
+        review = summary.get("pause", {}).get("count", 0)
+        stop = summary.get("block", {}).get("count", 0)
+        lines.append(f"Payment file checked by {run['by']} (ledger #{run['ledger_seq']}): "
+                     f"{ready} ready, {review} review, {stop} don't pay. Nothing was paid.")
+        for row in run.get("lines", []):
+            if row.get("verdict") == "go":
+                continue
+            lines.append(f"  [{row['verdict']}] line {row['line']}  {money(row['amount_cents'])}  "
+                         f"{row['vendor_name']}  {row['invoice_number']}")
+            lines.extend(f"        - {r}" for r in row.get("reasons", []))
         lines.append("")
     return "\n".join(lines)

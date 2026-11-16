@@ -6,6 +6,7 @@
     agent-checkpoint add-approver acme controller@acme.com           (API key for an approver tool)
     agent-checkpoint add-user acme cfo@acme.com --role admin         (web sign-in; prints a password once)
     agent-checkpoint import-vendors acme vendors.csv      /  import-pos acme pos.csv
+    agent-checkpoint import-history acme payments.csv [--date-order mdy|dmy]
     agent-checkpoint set-mode acme enforce
     agent-checkpoint serve --port 8077 --tls-cert cert.pem --tls-key key.pem   (or behind a proxy: --force-https)
     agent-checkpoint serve --dev                  (plain HTTP on localhost for development only)
@@ -29,7 +30,7 @@ from datetime import date
 
 from .accounts import AuthError
 from .gateway import CheckpointError
-from .importers import import_pos, import_vendors
+from .importers import import_history, import_pos, import_vendors
 from .models import parse_amount
 from .policy import AgentScope
 from .report import render_text, shadow_report
@@ -163,10 +164,17 @@ def cmd_set_mode(args) -> int:
 def cmd_import(args, which) -> int:
     store = _registry(args).gateway(args.org).org.store
     with open(args.file, encoding="utf-8-sig") as f:
-        n, errors = (import_vendors if which == "vendors" else import_pos)(store, f.read())
-    print(f"imported {n} {which}")
-    for e in errors:
+        text = f.read()
+    if which == "history":
+        added, already, errors = import_history(store, text, args.date_order)
+        print(f"added {added} past payments, {already} already there")
+    else:
+        n, errors = (import_vendors if which == "vendors" else import_pos)(store, text)
+        print(f"imported {n} {which}")
+    for e in errors[:20]:
         print("  " + e, file=sys.stderr)
+    if len(errors) > 20:
+        print(f"  ... {len(errors) - 20} more", file=sys.stderr)
     return 1 if errors else 0
 
 
@@ -262,8 +270,10 @@ def build_parser() -> argparse.ArgumentParser:
         s = sub.add_parser(name); s.add_argument("email"); s.set_defaults(fn=lambda a, d=dis: cmd_user_state(a, d))
     s = sub.add_parser("set-mode"); s.add_argument("org"); s.add_argument("mode", choices=["shadow", "enforce"])
     s.set_defaults(fn=cmd_set_mode)
-    for which in ("vendors", "pos"):
+    for which in ("vendors", "pos", "history"):
         s = sub.add_parser(f"import-{which}"); s.add_argument("org"); s.add_argument("file")
+        if which == "history":
+            s.add_argument("--date-order", choices=["mdy", "dmy"], default="mdy")
         s.set_defaults(fn=lambda a, w=which: cmd_import(a, w))
     s = sub.add_parser("serve"); s.add_argument("--host", default="127.0.0.1"); s.add_argument("--port", type=int, default=8077)
     s.add_argument("--tls-cert"); s.add_argument("--tls-key")

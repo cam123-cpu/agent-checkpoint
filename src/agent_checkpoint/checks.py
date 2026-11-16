@@ -342,6 +342,10 @@ def check_duplicate(req, ctx):
 
 
 def check_approval_limit(req, ctx):
+    # A payment file is a batch someone is already about to release. Flagging every line over the
+    # dollar limit hides the duplicate and the wrong account. The limit still applies to agents.
+    if ctx.actor == "run":
+        return []
     if req.action in ("pay", "refund") and req.amount_cents >= ctx.policy.approval_limit_cents:
         extra = " (two approvers)" if req.amount_cents >= ctx.policy.dual_approval_cents else ""
         return [Finding("approval_limit", P, f"{money(req.amount_cents)} is at or above the "
