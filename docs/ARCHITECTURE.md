@@ -48,7 +48,7 @@ sequenceDiagram
 | Re-check when the last approval arrives | Tickets wait hours; the world changes. Something that now blocks wins |
 | Fail closed everywhere | A check that errors blocks; unanswered tickets expire; an unreachable checkpoint means "nothing was done" |
 | Learning changes ranking only | Approvers' decisions re-weight the queue (Laplace-smoothed, as in the detector) but can never turn a pause into a go. Feedback can't train the control away |
-| Ed25519 receipts, public key published | Third parties (bank, ERP, auditor) can verify without being able to forge. This is how "no receipt, no money" gets enforced outside our code |
+| Ed25519 receipts, public key published | Third parties (bank, ERP, auditor) can verify without being able to forge. A partner's system can refuse transfers without one; nothing is enforced at a bank until a partner does |
 | One folder and DB per company | Isolation that doesn't depend on remembering a `WHERE org_id = ?` |
 | Network stores only HMAC of accounts | Companies share what's been seen, not anyone's bank details |
 | Shadow mode runs the same checks | The report a CFO sees in week 3 is exactly what enforcement would have done |

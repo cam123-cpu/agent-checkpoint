@@ -635,7 +635,7 @@
   }
 
   function evidencePanel(ev) {
-    const pct = (v) => v === null || v === undefined ? "Not enough data" : v + "%";
+    const pct = (v) => v === null || v === undefined ? "not enough data yet" : v + "%";
     const rows = [
       ["Payment files checked", ev.payment_files + " (" + count(ev.lines_checked, "line", "lines") + ")"],
       ["Held for review", ev.lines_held + " (" + ev.held_pct + "%)"],

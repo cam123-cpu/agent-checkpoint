@@ -31,16 +31,34 @@ trust, is a new layer.
 The strength of agent-security funding shows investors believe in the layer. It also means
 horizontal players could add a finance module. Speed and depth in finance are the defence.
 
-## What makes it venture-scale (all four, not one)
+## What it takes to be more than a control company
 
-1. **Own the path money takes.** Signed receipts the rail requires ("no receipt, no money"). An
-   optional control is a feature; a required one is infrastructure.
-2. **Independence.** One referee across Salesforce, Microsoft and startup agents.
-3. **The fraud network.** A fraud account or domain seen at one customer is blocked at all of
-   them. This is the data moat; it compounds with every customer and is the one thing a
-   single-company tool can't copy.
-4. **Become the evidence standard.** The ledger becomes what auditors and insurers ask for:
-   premium discounts for checkpoint users would turn insurers into distribution.
+A solid control company is a real business and a plausible acquisition. It is not a billion-dollar
+company. Business-email-compromise losses run to billions a year, but the budget that gets spent sits
+with the bank that releases the file, the system that already pays the bill, and the insurer that
+covers the theft. An optional second opinion on a spreadsheet reaches a few thousand controllers.
+
+There is one shape in which this is venture-scale: **something that already moves the money will not
+release a payment unless the checkpoint's record says the account is allowed.** A receipt that only our
+own software checks does not get there. The gates, in order, with what in the product serves each:
+
+| Gate | Pass if | Stop if | In the product |
+|---|---|---|---|
+| 1. One real file | A controller lets us check one ordinary payment file, and they work the queue | More than about 15% of ordinary lines held and they won't work it | `check-run`; the hold rate on every run and in the audit log; `docs/PILOT.md` |
+| 2. Five paying controllers | Five who already pay through Bill.com, Ramp or their bank pay for the file check | None will | Priced as the locked allowed-accounts list plus the weekly file check, not as an agent product. `usage` meters files checked and lines released |
+| 3. One partner in the path | One bank or accounting system rejects a file with no release from us. Ask five; silence is a no for a year | Silence | Signed releases and allowed-accounts lists, an offline verifier, `docs/PARTNER.md`. Until this is a yes, don't describe a path to a unicorn |
+| 4. Charge for the path | A fee per payment file, or a small fee on payments released, across that partner's book | One regional bank stays one regional bank | `usage` is the meter. The second path is a cyber insurer that requires the control, which needs a miss rate from real files: `evidence`, `mark-line`, `report-miss` |
+| 5. The shared list | Many companies already on the path | One report blocks everyone; key beside the data; no undo | One outside report pauses, two block; free-mail never listed; hashed domains; withdrawal; keys apart from the data (`move-keys`, `doctor`) |
+
+Most companies that try this stop at gate 2 and get bought, or stay a small product. The ones that
+reach a billion dollars are the ones a bank or an insurer cannot route around. That outcome is
+uncommon, and it is the only one in which this idea is a unicorn.
+
+What stays unbuilt until a gate asks for it: live QuickBooks, Xero or NetSuite; a real bank rail (and
+not before the books commit before any outside call); account-ownership checks; passkeys; PostgreSQL;
+SCIM; an enforce switch for a pilot; an outside pen test before anyone's money depends on enforce mode;
+an insurer meeting before there is one real line to show; and any pitch that another customer's fraud
+report will block anything.
 
 Then expand by action type: invoices → refunds → payroll changes → procurement → treasury.
 
@@ -50,19 +68,20 @@ Then expand by action type: invoices → refunds → payroll changes → procure
   before enforcement, and also works on today's RPA and AP-automation traffic.
 - **Squeeze.** Banks and spend platforms keep building guardrails in; horizontal security adds
   finance.
-- **Bypass.** If deployments leave agents other payment paths, the checkpoint is advisory.
-  Receipts plus rail and bank partnerships are the answer, and the hardest go-to-market work.
+- **Bypass.** Until a partner refuses payments without a release, the checkpoint is advisory, whatever
+  the receipts say. Gate 3 is the hardest go-to-market work and the one that decides the outcome.
 - **The network is one file.** Fraud reports live in `network/intel.db` on a single installation.
   Two customers on two servers do not see each other's reports until someone operates that as a
-  shared service. The moat starts there. It is not in the simulator.
+  shared service. It only becomes worth anything after many companies are on the path (gate 5).
 - **Base rates.** Most well-funded startups in hot categories don't reach $1B.
 
 ## The first 90 days
 
-- 3–5 design partners in shadow mode on real AP traffic (agents, RPA or humans).
-- One real near-miss caught, written up with the customer's permission.
-- One rail integration (an ERP bill-payment API) enforcing receipts.
-- One conversation with a crime and cyber insurer about premium credit.
+- Gate 1: one real payment file, with the controller's permission, in shadow. Write down the hold rate.
+- Gate 2: five controllers asked to pay for the file check. Count the yeses.
+- Gate 3: five banks or payment systems asked whether they would refuse a file without a release. Count
+  the yeses; silence counts as no.
+- Nothing else until those numbers exist.
 
 ## Sources
 

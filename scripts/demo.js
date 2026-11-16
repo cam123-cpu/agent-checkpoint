@@ -78,6 +78,9 @@
           (!q || r.vendor_name.toLowerCase().includes(q) || r.invoice_number.toLowerCase().includes(q))) };
       }
       if (route === "audit") return D.audit;
+      if (route === "evidence") return D.evidence;
+      if (route === "allowed-accounts" || route.endsWith("/release"))
+        fail(403, "Signing is turned off in this demo. In the real app an approver signs it with the company's key, for the bank to check.");
       if (route === "vendors" && method === "GET") return { vendors: D.vendors };
       if (route === "setup") return D.setup;
       if (route === "payment-run") fail(403, "Uploading is turned off in this demo. Use the sample payment run instead.");
