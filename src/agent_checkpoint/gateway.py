@@ -146,7 +146,10 @@ class Gateway:
                 "request_sha256": hashlib.sha256(json.dumps(full, sort_keys=True).encode()).hexdigest(),
                 "findings_full": self._rows(findings)})
             if returned is Verdict.GO:
-                d.status, d.transfer_id = self._execute(req, [], now)
+                # Shadow tells the agent to go on, but a bank change the checks would have blocked is not
+                # written into the vendor list. A re-import cannot undo a bank change (that is the point of
+                # the import rule), so a watch-only pilot must not be stuck with an account the checks rejected.
+                d.status, d.transfer_id = self._execute(req, [], now, write_bank=verdict is not Verdict.BLOCK)
         if notify:
             org.notifier.send(*notify, org.policy.approvers)
         return d
@@ -199,10 +202,14 @@ class Gateway:
         summary = {v: {"count": sum(r["verdict"] == v for r in results),
                        "amount_cents": sum(r["amount_cents"] for r in results if r["verdict"] == v)}
                    for v in ("go", "pause", "block")}
-        org.ledger.append("payment_run_checked", "-", {"by": person, "file_sha256": file_sha256, "rows": len(rows),
-                                                       "summary": summary})
         order = {"block": 0, "pause": 1, "go": 2}
-        return {"rows": sorted(results, key=lambda r: (order[r["verdict"]], -r["risk"], r["line"])), "summary": summary}
+        shown = sorted(results, key=lambda r: (order[r["verdict"]], -r["risk"], r["line"]))
+        org.ledger.append("payment_run_checked", "-", {
+            "by": person, "file_sha256": file_sha256, "rows": len(rows), "summary": summary,
+            "lines": [{k: r[k] for k in ("line", "vendor_id", "vendor_name", "invoice_number", "amount_cents",
+                                         "account_in_file", "verdict", "risk", "reasons")} for r in shown],
+        })
+        return {"rows": shown, "summary": summary}
 
     def status(self, request_id: str, agent_id: str | None = None) -> dict:
         previous = self.org.ledger.find(request_id, "decision")
@@ -346,7 +353,8 @@ class Gateway:
         return [{"check": f.check, "verdict": f.verdict.value, "message": f.message, "weight": f.weight}
                 for f in findings]
 
-    def _execute(self, req: ActionRequest, approved_by: list[str], now: datetime) -> tuple[str, str | None]:
+    def _execute(self, req: ActionRequest, approved_by: list[str], now: datetime, *,
+                 write_bank: bool = True) -> tuple[str, str | None]:
         org, store = self.org, self.org.store
         vendor = store.vendor(req.vendor_id)
         shadow = org.policy.mode == "shadow"
@@ -371,11 +379,14 @@ class Gateway:
             store.record_payment(Payment(req.request_id, req.agent_id, req.vendor_id, key, req.amount_cents,
                                          norm_account(payee), req.on, req.action, "observed" if shadow else "rail"),
                                  po_number=req.po_number if req.action == "pay" else "")
-        elif req.action == "change_bank" and vendor:
+        elif req.action == "change_bank" and vendor and write_bank:
             store.set_bank(req.vendor_id, req.bank_account, req.on)
         status = "observed" if shadow else "executed"
-        org.ledger.append("executed", req.request_id, {
+        done = {
             "agent_id": req.agent_id, "action": req.action, "on": req.on.isoformat(), "status": status,
             "approved_by": approved_by, "transfer_id": transfer_id,
-        })
+        }
+        if req.action == "change_bank":
+            done["bank_change_applied"] = bool(vendor and write_bank)
+        org.ledger.append("executed", req.request_id, done)
         return status, transfer_id

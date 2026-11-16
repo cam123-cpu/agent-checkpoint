@@ -81,8 +81,12 @@ a phone (add it to the home screen) and on a desktop:
 - **Audit log.** The integrity check and the fingerprint to hand to your auditor.
 - **Payment run.** Upload the bills you're about to pay (CSV from Excel or your accounting system) and get
   Ready to pay / Review first / Don't pay for each one: duplicates in the file and against past payments,
-  bank accounts that differ from the vendor list, unknown vendors, splits, unusual amounts. Nothing is
-  paid or changed. This works for companies that don't use AI agents yet.
+  bank accounts that differ from the vendor list, unknown vendors, splits, unusual amounts. A line is not
+  held only because it is over the approval limit, so a normal weekly file does not bury the real problems.
+  "Contoso Packaging, LLC" matches "Contoso Packaging". A column named Account is the general-ledger
+  account, not the vendor's bank account. Nothing is paid or changed. Every line is kept on the audit log,
+  and `agent-checkpoint report` prints the ones that were not ready. This works for companies that don't
+  use AI agents yet.
 - **Vendors.** Add and edit vendors; request a bank change (a different person approves it after phoning
   the vendor on the number on file).
 - **Setup.** A getting-started checklist and data-health warnings; rules; importing your vendor list,
@@ -122,12 +126,14 @@ a paid invoice, and a payment to a vendor that doesn't exist.
 |---|---|---|
 | Incidents stopped | 113 / 120 | 113 / 120 |
 | Over-limit / bank-change actions sent to a human | 68 / 68 | 68 / 68 |
-| Clean actions interrupted | 23 / 536 (4.3%)\* | **1 / 536 (0.2%)** |
+| Clean actions interrupted | 7 / 536 (1.3%)\* | **1 / 536 (0.2%)** |
 | Money lost to incidents | $1,378,500 (it only watches) | $45,900 |
 | Slowest decision | < 2 ms | < 2 ms |
 
-\*Mostly side effects of the planted fraud: shadow mode lets the fraudster's bank change through,
-so the real supplier's next invoices clash with the poisoned record. That's worth a pause too.
+\*Shadow still tells the agent to proceed, and it records the payments the agent would have made.
+A bank change the checks would have blocked is not written into the vendor list, so later clean
+invoices no longer clash with a fraudulent account. Those 7 clean interruptions are six splits
+that look like a normal second bill, and one unusual amount.
 
 **The 7 misses are honest misses.** Six are the *first* half of a split payment, which looks
 normal on its own (the second half is always caught). One is a 3x amount at a vendor whose
@@ -187,6 +193,7 @@ agent-checkpoint add-agent acme ap-agent --actions pay,change_bank --max 100000 
 agent-checkpoint add-approver acme controller@acme.com
 agent-checkpoint import-vendors acme examples/vendors.csv
 agent-checkpoint import-pos acme examples/pos.csv
+agent-checkpoint import-history acme payments.csv --date-order mdy
 agent-checkpoint serve --port 8077                # behind TLS; agents use HTTP or `mcp --url`
 agent-checkpoint report acme --since 2026-11-01   # the shadow-mode report for the CFO
 ```
@@ -220,7 +227,7 @@ for the design.
 
 ```bash
 pip install -e ".[dev]"
-pytest -q          # 197 tests, plus a real browser when Playwright is installed: checks, approvals, receipts,
+pytest -q          # 199 tests, plus a real browser when Playwright is installed: checks, approvals, receipts,
                    # ledger tampering, network, MCP (incl. a real stdio process), HTTP, CLI, quality bar,
                    # the security checklist, and design rules
 ruff check src tests scripts

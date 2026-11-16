@@ -131,6 +131,34 @@ def test_payment_run_finds_problems_and_changes_nothing(site):
     assert (store.counts(), store.po("PO-1").billed_cents, len(gw.org.ledger.entries("decision"))) == before
     entry = gw.org.ledger.entries("payment_run_checked")[-1]["body"]
     assert entry["by"] == "approver@acme.com" and entry["file_sha256"] == "abc"
+    assert {line["invoice_number"] for line in entry["lines"]} >= {"A-1", "A-2"}
+    assert ACCT not in json.dumps(entry["lines"]) and "GB00ATTACKER" not in json.dumps(entry["lines"])
+    from agent_checkpoint.report import render_text, shadow_report
+    text = render_text(shadow_report(gw.org.ledger))
+    assert "Nothing was paid" in text and "A-2" in text
+    from agent_checkpoint.views import activity, audit
+    flagged = activity(gw)
+    assert any(r["agent_id"] == "payment-run" and r["invoice_number"] == "A-2" for r in flagged)
+    assert "don't pay" in audit(gw)["recent"][0]["summary"]
+
+
+def test_payment_run_names_suffixes_limits_and_columns(site):
+    reg, gw, as_, _ = site
+    store = gw.org.store
+    text = f"Supplier,Num,Amount,Account,Payee account\n\"Northwind Supplies, LLC\",BIG-1,\"20,000.00\",1000,{ACCT}\n"
+    rows, errors = read_payment_run(store, text)
+    assert errors == [] and rows[0]["vendor_id"] == "V1" and rows[0]["bank_account"] == ACCT
+    out = gw.check_run(rows, "approver@acme.com", "hash")
+    assert out["rows"][0]["verdict"] == "go"
+    assert not any("approval limit" in reason for reason in out["rows"][0]["reasons"])
+    # Two vendors that strip to the same name are not silently merged.
+    store.upsert_vendor(Vendor("V3", "Northwind Supplies Inc", "US1111222233334444", ("n2.com",), date(2024, 1, 1)))
+    ambiguous, errors = read_payment_run(store, "Vendor,Amount\nNorthwind Supplies LLC,100.00\n")
+    assert errors == [] and ambiguous[0]["vendor_id"] == "Northwind Supplies LLC"
+    bare = map_headers(["Vendor", "Amount", "Account"], ["name", "amount", "bank_account"])
+    assert "bank_account" not in bare
+    numbered = map_headers(["Vendor", "Num", "Amount"], ["name", "invoice_number", "amount"])
+    assert numbered["invoice_number"] == 1
 
 
 def test_payment_run_over_the_web(site):

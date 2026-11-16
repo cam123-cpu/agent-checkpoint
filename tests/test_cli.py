@@ -21,6 +21,10 @@ def test_onboarding_flow(tmp_path, capsys):
     assert main(h + ["import-pos", "acme", str(tmp_path / "p.csv")]) == 1
     err = capsys.readouterr().err
     assert "line 3" in err and "unknown vendor 'V9'" in err
+    (tmp_path / "h.csv").write_text("Supplier,Invoice #,Amount Paid,Payment Date\n"
+                                    "Acme Supplies,INV-1,\"100.00\",03/04/2026\n")
+    assert main(h + ["import-history", "acme", str(tmp_path / "h.csv"), "--date-order", "mdy"]) == 0
+    assert "added 1" in capsys.readouterr().out
     assert main(h + ["set-mode", "acme", "enforce"]) == 0
 
     from agent_checkpoint.tenancy import Registry
