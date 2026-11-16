@@ -39,7 +39,7 @@ from .tenancy import Registry
 
 
 def _registry(args) -> Registry:
-    return Registry(args.home or os.environ.get("CHECKPOINT_HOME", "./checkpoint-data"))
+    return Registry(args.home or os.environ.get("CHECKPOINT_HOME", "./checkpoint-data"), getattr(args, "keys", None))
 
 
 def cmd_demo(args) -> int:
@@ -226,6 +226,33 @@ def cmd_resolve(args, approve: bool) -> int:
     return 0
 
 
+def cmd_move_keys(args) -> int:
+    for path in _registry(args).move_secrets():
+        print("moved", path)
+    return 0
+
+
+def cmd_doctor(args) -> int:
+    """Plain checks someone can run before a pilot. Exit 1 if anything needs fixing."""
+    reg, problems = _registry(args), 0
+    beside = reg.secrets_beside_data()
+    if beside:
+        problems += 1
+        print(f"FIX  {len(beside)} secret(s) are inside the data folder, so a copy of it can be read. "
+              "Set AGENT_CHECKPOINT_KEYS to a folder elsewhere and run move-keys.")
+    else:
+        print("ok   secrets are kept apart from the data")
+    orgs_dir = os.path.join(reg.home, "orgs")
+    for org in sorted(os.listdir(orgs_dir)) if os.path.isdir(orgs_dir) else []:
+        gw = reg.gateway(org)
+        ok, why = gw.org.ledger.verify()
+        print(("ok  " if ok else "FIX ") + f" {org}: audit log {why}")
+        problems += not ok
+        print(f"ok   {org}: mode {gw.org.policy.mode}" if gw.org.policy.mode == "shadow" else
+              f"note {org}: mode enforce. Agents' actions are stopped, not only reported.")
+    return 1 if problems else 0
+
+
 def cmd_withdraw_report(args) -> int:
     print(json.dumps(_registry(args).gateway(args.org).withdraw_report(args.request, args.as_, args.reason), indent=2))
     return 0
@@ -248,6 +275,7 @@ def cmd_verify(args) -> int:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="agent-checkpoint", description="Independent checkpoint for AI agents and money")
     p.add_argument("--home", help="data folder (default: $CHECKPOINT_HOME or ./checkpoint-data)")
+    p.add_argument("--keys", help="secrets folder, kept apart from the data (default: $AGENT_CHECKPOINT_KEYS)")
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("demo").set_defaults(fn=cmd_demo)
     s = sub.add_parser("create-org"); s.add_argument("org"); s.add_argument("--name", required=True)
@@ -301,6 +329,8 @@ def build_parser() -> argparse.ArgumentParser:
         else:
             s.add_argument("--fraud", action="store_true", help="report to the shared fraud network")
         s.set_defaults(fn=lambda a, ap=approve: cmd_resolve(a, ap))
+    sub.add_parser("move-keys", help="move every secret out of the data folder into --keys").set_defaults(fn=cmd_move_keys)
+    sub.add_parser("doctor", help="checks before a pilot: keys, mode, ledger").set_defaults(fn=cmd_doctor)
     s = sub.add_parser("withdraw-report", help="take back your company's fraud report for a request")
     s.add_argument("org"); s.add_argument("request"); s.add_argument("--as", dest="as_", required=True)
     s.add_argument("--reason", default=""); s.set_defaults(fn=cmd_withdraw_report)
