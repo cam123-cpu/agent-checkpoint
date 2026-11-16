@@ -182,7 +182,8 @@ def make_server(registry: Registry, host: str = "127.0.0.1", port: int = 8077, c
             except ValueError as exc:
                 raise HTTPError(400, "bad Content-Length") from exc
             if length < 0 or length > limit:
-                raise HTTPError(413, "request body is too large")
+                self.close_connection = True  # the unread body makes this connection unusable
+                raise HTTPError(413, "request body is too large", {"Connection": "close"})
             return self.rfile.read(length)
 
         def _body(self, allowed: set[str] | None = None) -> dict:
