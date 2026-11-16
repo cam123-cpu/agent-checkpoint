@@ -150,6 +150,13 @@ def audit(gw, limit: int = 100) -> dict:
             "rejected": lambda: "malformed request refused",
             "fraud_report": lambda: f"reported to fraud network by {b.get('by', '')}",
             "fraud_report_withdrawn": lambda: f"fraud report withdrawn by {b.get('by', '')}",
+            "release_issued": lambda: (f"{b.get('by', '')} signed a release: {b.get('released', 0)} lines "
+                                       f"(${b.get('released_cents', 0) / 100:,.2f}), {b.get('held', 0)} held"),
+            "allowed_accounts_issued": lambda: (f"{b.get('by', '')} signed allowed-accounts list version "
+                                                f"{b.get('version', '')} ({b.get('accounts', 0)} accounts)"),
+            "line_outcome": lambda: f"{b.get('by', '')} marked line {b.get('line', '')} as {b.get('outcome', '')}",
+            "miss_reported": lambda: (f"{b.get('by', '')} recorded fraud that got through: "
+                                      f"${b.get('amount_cents', 0) / 100:,.2f}"),
             "execution_failed": lambda: "payment rail refused the receipt",
             "payment_run_checked": lambda: (
                 f"{b.get('by', 'someone')} checked a payment file: "

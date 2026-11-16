@@ -308,3 +308,28 @@ def test_history_import_over_the_web(site):
     assert gw.org.store.payments("V1")[0].on == date(2026, 4, 3)
     assert as_("admin@acme.com").req("POST", "/api/web/import/history?date_order=ymd", raw=csv, ctype="text/csv")[0] == 422
     assert as_("approver@acme.com").req("POST", "/api/web/import/history", raw=csv, ctype="text/csv")[0] == 403
+
+
+def test_release_and_evidence_over_the_web(site):
+    from datetime import UTC, datetime
+
+    from agent_checkpoint.release import check_release, verify
+    reg, gw, as_, _ = site
+    body = b"Vendor,Invoice,Amount\nNorthwind Supplies,N-1,100.00\nContoso,C-1,50.00\nNobody Ltd,X-1,10.00\n"
+    approver = as_("approver@acme.com")
+    status, out, _ = approver.req("POST", "/api/web/payment-run", raw=body, ctype="text/csv")
+    assert status == 200 and out["pilot"]["not_ready"] == 1
+    run_id = out["run_id"]
+    assert as_("audit@acme.com").req("POST", f"/api/web/payment-run/{run_id}/release", {})[0] == 403
+    assert as_("admin@beta.com").req("POST", f"/api/web/payment-run/{run_id}/release", {})[0] == 404  # other company
+    status, doc, _ = approver.req("POST", f"/api/web/payment-run/{run_id}/release", {})
+    assert status == 200
+    signed = verify(gw.org.signer.public_pem(), doc, "release", datetime.now(UTC))
+    assert check_release(signed, body)["release_lines"] == [2, 3]
+    assert approver.req("POST", f"/api/web/payment-run/{run_id}/lines/4/outcome", {"outcome": "fraud"})[0] == 200
+    assert approver.req("POST", f"/api/web/payment-run/{run_id}/lines/4/outcome", {"outcome": "maybe"})[0] == 422
+    assert approver.req("POST", "/api/web/misses", {"amount": "250.00", "note": "wire outside the file"})[0] == 200
+    status, ev, _ = as_("audit@acme.com").req("GET", "/api/web/evidence")
+    assert status == 200 and ev["held_fraud"] == 1 and ev["misses_recorded"] == 1 and "PUBLIC KEY" in ev["public_key"]
+    status, lst, _ = approver.req("POST", "/api/web/allowed-accounts", {})
+    assert status == 200 and lst["body"]["version"] == 1 and len(lst["body"]["accounts"]) == 2
