@@ -346,7 +346,10 @@ def test_upload_restrictions(app):
     assert adm.req("POST", "/api/web/import/vendors", raw=ok, ctype="application/x-msdownload")[0] == 415
     assert adm.req("POST", "/api/web/import/vendors", raw=b"\xff\xfe\x00bad", ctype="text/csv")[0] == 422
     assert adm.req("POST", "/api/web/import/vendors", raw=b"a,b\n" + b"\x00" * 10, ctype="text/csv")[0] == 422
-    assert adm.req("POST", "/api/web/import/vendors", raw=b"x" * (1024 * 1024 + 1), ctype="text/csv")[0] == 413
+    try:  # refused before the body is read; some systems reset the connection mid-send instead of showing the 413
+        assert adm.req("POST", "/api/web/import/vendors", raw=b"x" * (1024 * 1024 + 1), ctype="text/csv")[0] == 413
+    except (ConnectionResetError, BrokenPipeError):
+        pass
     appr = client(); appr.login("approver@acme.com")
     assert appr.req("POST", "/api/web/import/vendors", raw=ok, ctype="text/csv")[0] == 403
 
