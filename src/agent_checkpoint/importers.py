@@ -15,7 +15,7 @@ import io
 from datetime import date
 
 from .models import parse_amount
-from .store import PurchaseOrder, Store, Vendor
+from .store import PurchaseOrder, Store, Vendor, norm_account
 
 
 def _rows(text: str):
@@ -34,6 +34,9 @@ def import_vendors(store: Store, text: str) -> tuple[int, list[str]]:
             created = date.fromisoformat(r["created_on"]) if r.get("created_on") else date(2000, 1, 1)
             domains = tuple(d.strip().lower() for d in r.get("email_domains", "").split(";") if d.strip())
             existing = store.vendor(r["vendor_id"])
+            if existing and norm_account(existing.bank_account) != norm_account(r["bank_account"]):
+                raise ValueError(f"{r['vendor_id']}: the bank account differs from the one on file. Bank details "
+                                 "only change through a bank-change request that a person approves after a phone call")
             vendors.append(Vendor(r["vendor_id"], r["name"], r["bank_account"], domains, created,
                                   existing.bank_changed_on if existing else None, r.get("phone", "")))
         except ValueError as exc:

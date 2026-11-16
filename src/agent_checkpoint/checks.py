@@ -14,7 +14,9 @@ blocked and the error is recorded.
 from __future__ import annotations
 
 import math
+import re
 import statistics
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime
 from difflib import SequenceMatcher
@@ -39,25 +41,56 @@ class Context:
     weights: dict[str, float] = field(default_factory=dict)
 
 
+_ADDR = re.compile(r"[^\s<>\"'(),;:@]+@([^\s<>\"'(),;:@]+)")
+
+
 def domain_of(address: str) -> str:
-    """'Billing <ap@acme.com> via inbox' → 'acme.com'."""
-    if "@" not in address:
-        return ""
-    tail = address.split("@", 1)[1]
-    out = ""
-    for ch in tail:
-        if ch.isalnum() or ch in ".-":
-            out += ch
-        else:
-            break
-    return out.strip(".").lower()
+    """The domain that actually sent it: the address in <angle brackets> if there is one, else the first address."""
+    folded = unicodedata.normalize("NFKC", address or "")
+    bracket = re.findall(r"<([^<>]*)>", folded)
+    target = bracket[-1] if bracket else folded
+    m = _ADDR.search(target)
+    return m.group(1).strip(".").lower() if m else ""
+
+
+def display_spoof(address: str) -> str | None:
+    """'"billing@vendor.com" <x@evil.example>': the name shows one address, the mail came from another."""
+    folded = unicodedata.normalize("NFKC", address or "")
+    if "<" not in folded:
+        return None
+    real = domain_of(folded)
+    shown = {m.group(1).strip(".").lower() for m in _ADDR.finditer(re.sub(r"<[^<>]*>", " ", folded))}
+    other = sorted(d for d in shown if d != real)
+    return other[0] if other and real else None
+
+
+def _sender_strings(req: ActionRequest) -> list[str]:
+    out = [e.sender for e in req.evidence if e.kind == "email" and e.sender]
+    out += [e.sender for e in req.evidence if e.kind == "invoice" and e.sender]
+    if req.instructed_by and req.instructed_by.source == "email":
+        out.append(req.instructed_by.identity)
+    return out
 
 
 def _senders(req: ActionRequest) -> list[str]:
-    out = [e.sender for e in req.evidence if e.kind == "email" and e.sender]
-    if req.instructed_by and req.instructed_by.source == "email":
-        out.append(req.instructed_by.identity)
-    return [d for d in (domain_of(s) for s in out) if d]
+    """Every sending domain mentioned, real sender first. Forwarded 'x@vendor via ap@us' yields both."""
+    out = []
+    for s in _sender_strings(req):
+        for d in [domain_of(s)] + [m.group(1).strip(".").lower() for m in _ADDR.finditer(unicodedata.normalize("NFKC", s))]:
+            if d and d not in out:
+                out.append(d)
+    return out
+
+
+def check_display_spoof(req, ctx):
+    if req.action not in ("pay", "change_bank", "refund"):
+        return []
+    for s in _sender_strings(req):
+        shown = display_spoof(s)
+        if shown:
+            return [Finding("display_name_spoof", B, f"The sender's name shows an address at {shown}, but the message "
+                                                     f"came from {domain_of(s)}", 0.95)]
+    return []
 
 
 # --- every action ---------------------------------------------------------------------
@@ -148,15 +181,25 @@ def check_sender(req, ctx):
     if req.action not in ("pay", "refund") or v is None or not v.email_domains:
         return []
     known = set(v.email_domains)
+    out: list[Finding] = []
     for d in _senders(req):
         if d in known or d in ctx.policy.internal_domains:
             continue
-        lookalike = next((k for k in known if SequenceMatcher(None, d, k).ratio() >= 0.8), None)
+        lookalike = _lookalike(d, known)
         if lookalike:
             return [Finding("lookalike_domain", B, f"Sent from {d}, a look-alike of {lookalike}, the real domain "
                                                    f"for {v.name}", 0.95)]
-        return [Finding("unknown_sender", P, f"Sent from {d}, which is not a known domain for {v.name}", 0.6)]
-    return []
+        out = out or [Finding("unknown_sender", P, f"Sent from {d}, which is not a known domain for {v.name}", 0.6)]
+    return out
+
+
+def _lookalike(domain: str, known: set[str]) -> str | None:
+    """Close spelling, a known domain hidden in a longer one (vendor.com.evil.example), or punycode."""
+    for k in known:
+        if SequenceMatcher(None, domain, k).ratio() >= 0.8 or domain.startswith(k + ".") or (
+                domain.startswith("xn--") or ".xn--" in domain):
+            return k
+    return None
 
 
 def check_recent_bank_change(req, ctx):
@@ -306,9 +349,9 @@ def check_bank_change(req, ctx):
                                                 f"vendor, {shared.name}", 0.9))
     known = set(v.email_domains)
     for d in _senders(req):
-        if d in known:
+        if d in known or d in ctx.policy.internal_domains:
             continue
-        lookalike = next((k for k in known if SequenceMatcher(None, d, k).ratio() >= 0.8), None)
+        lookalike = _lookalike(d, known)
         if lookalike:
             out.append(Finding("lookalike_domain", B, f"Request came from {d}, a look-alike of {lookalike}, the real "
                                                       f"domain for {v.name}", 0.95))
@@ -348,7 +391,7 @@ def check_edit(req, ctx):
 
 
 CHECKS = (
-    check_scope, check_burst, check_provenance, check_currency, check_vendor_known, check_fraud_network,
+    check_scope, check_burst, check_provenance, check_currency, check_vendor_known, check_fraud_network, check_display_spoof,
     check_sender, check_invoice_account, check_recent_bank_change, check_po, check_duplicate, check_approval_limit,
     check_split, check_amount_outlier, check_new_vendor, check_lookalike_vendor,
     check_bank_change, check_refund, check_edit,

@@ -123,8 +123,9 @@ def _fails(site, idp, *, email="approver@acme.com", claims=None, tamper=None, he
     status, _, r = callback(c, "cp_sso=someone-else" if wrong_binding else binding, q["state"], extra=error)
     loc = r.getheader("Location")
     assert status == 302 and loc.startswith("/?sso_error="), loc
+    assert loc.split("=", 1)[1] in SSOError.MESSAGES, loc  # a fixed code, never free text
     assert not any(x.startswith("cp_session=") and "Max-Age=0" not in x for x in r.headers.get_all("Set-Cookie") or [])
-    return urllib.parse.unquote(loc.split("=", 1)[1])
+    return SSOError.MESSAGES[loc.split("=", 1)[1]]
 
 
 def test_rejections(site, idp):

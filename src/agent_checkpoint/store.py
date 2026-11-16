@@ -21,6 +21,7 @@ import json
 import re
 import sqlite3
 import threading
+import unicodedata
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -49,7 +50,7 @@ CREATE TABLE IF NOT EXISTS tickets (
     ticket_id TEXT PRIMARY KEY, request_id TEXT NOT NULL UNIQUE, request TEXT NOT NULL,
     findings TEXT NOT NULL, status TEXT NOT NULL, needed INTEGER NOT NULL,
     approvals TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL, expires_at TEXT NOT NULL,
-    closed_by TEXT, note TEXT NOT NULL DEFAULT '', fraud INTEGER NOT NULL DEFAULT 0
+    closed_by TEXT, note TEXT NOT NULL DEFAULT '', fraud INTEGER NOT NULL DEFAULT 0, payee_fp TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS transfers (
     receipt_id TEXT PRIMARY KEY, request_id TEXT NOT NULL UNIQUE, receipt TEXT NOT NULL, executed_at TEXT NOT NULL
@@ -64,9 +65,15 @@ def norm_account(acct: str) -> str:
     return re.sub(r"[^0-9A-Za-z]", "", acct or "").upper()
 
 
+def _fold(text: str) -> str:
+    """Full-width letters, other scripts' digits, invisible characters: fold to plain ASCII where they mean the same."""
+    s = unicodedata.normalize("NFKC", text or "")
+    return "".join(str(unicodedata.decimal(ch)) if ch.isdecimal() else ch for ch in s)
+
+
 def norm_invoice(number: str) -> str:
-    """INV-0042, inv 42, Invoice #42 → 42. The same invoice arriving twice must match."""
-    s = re.sub(r"[^0-9A-Za-z]", "", number or "").upper()
+    """INV-0042, inv 42, Invoice #42, ＩＮＶ－４２ → 42. The same invoice arriving twice must match."""
+    s = re.sub(r"[^0-9A-Za-z]", "", _fold(number)).upper()
     s = re.sub(r"^(INVOICE|INV|NO|NR)+", "", s)
     return s.lstrip("0") or s
 
@@ -124,6 +131,8 @@ class Store:
         self.db = sqlite3.connect(path, check_same_thread=False, isolation_level=None, timeout=10)
         self.db.execute("PRAGMA busy_timeout = 10000")
         self.db.executescript(SCHEMA)
+        if "payee_fp" not in {r[1] for r in self.db.execute("PRAGMA table_info(tickets)")}:
+            self.db.execute("ALTER TABLE tickets ADD COLUMN payee_fp TEXT NOT NULL DEFAULT ''")
 
     @contextmanager
     def tx(self):
@@ -218,23 +227,23 @@ class Store:
     # --- tickets ----------------------------------------------------------------------
 
     def add_ticket(self, ticket_id: str, request: dict, findings: list[dict], needed: int,
-                   created_at: datetime, expires_at: datetime) -> None:
-        self.q("INSERT INTO tickets (ticket_id, request_id, request, findings, status, needed, created_at, expires_at) "
-               "VALUES (?, ?, ?, ?, 'open', ?, ?, ?)",
+                   created_at: datetime, expires_at: datetime, payee_fp: str = "") -> None:
+        self.q("INSERT INTO tickets (ticket_id, request_id, request, findings, status, needed, created_at, expires_at, "
+               "payee_fp) VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?)",
                (ticket_id, request["request_id"], self.crypto.encrypt(json.dumps(request), f"tickets:{ticket_id}"),
                 json.dumps(findings), needed,
-                created_at.isoformat(), expires_at.isoformat()))
+                created_at.isoformat(), expires_at.isoformat(), payee_fp))
 
     def ticket(self, ticket_id: str) -> dict | None:
         rows = self.q("SELECT ticket_id, request_id, request, findings, status, needed, approvals, created_at, "
-                      "expires_at, closed_by, note, fraud FROM tickets WHERE ticket_id = ?", (ticket_id,))
+                      "expires_at, closed_by, note, fraud, payee_fp FROM tickets WHERE ticket_id = ?", (ticket_id,))
         if not rows:
             return None
         r = rows[0]
         return {"ticket_id": r[0], "request_id": r[1], "request": json.loads(self.crypto.decrypt(r[2], f"tickets:{r[0]}")),
                 "findings": json.loads(r[3]),
                 "status": r[4], "needed": r[5], "approvals": json.loads(r[6]), "created_at": r[7],
-                "expires_at": r[8], "closed_by": r[9], "note": r[10], "fraud": bool(r[11])}
+                "expires_at": r[8], "closed_by": r[9], "note": r[10], "fraud": bool(r[11]), "payee_fp": r[12]}
 
     def ticket_for(self, request_id: str) -> dict | None:
         rows = self.q("SELECT ticket_id FROM tickets WHERE request_id = ?", (request_id,))

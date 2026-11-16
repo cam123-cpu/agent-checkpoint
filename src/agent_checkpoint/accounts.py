@@ -37,7 +37,9 @@ IDLE = timedelta(minutes=30)
 ABSOLUTE = timedelta(hours=12)
 WINDOW = timedelta(minutes=15)
 PENDING = timedelta(minutes=5)
-PAIR_LIMIT, IP_LIMIT, CODE_TRIES = 5, 30, 5
+PAIR_LIMIT, IP_LIMIT, ACCOUNT_LIMIT, CODE_TRIES = 5, 30, 20, 5
+# scrypt needs 16 MB and ~50 ms per check: never run more than this many at once (a flood waits, then gets 503).
+HASH_SLOTS = threading.BoundedSemaphore(4)
 N, R, P = 2**14, 8, 1
 
 SCHEMA = """
@@ -90,6 +92,15 @@ def verify_password(password: str, stored: str) -> bool:
 
 
 DUMMY_HASH = hash_password(secrets.token_urlsafe(16))
+
+
+def _bounded_verify(password: str, stored: str) -> bool:
+    if not HASH_SLOTS.acquire(timeout=5):
+        raise AuthError(503, "The server is busy. Try again in a moment.")
+    try:
+        return verify_password(password, stored)
+    finally:
+        HASH_SLOTS.release()
 
 
 def password_problem(password: str, email: str) -> str | None:
@@ -182,7 +193,7 @@ class Accounts:
 
     def change_password(self, email: str, current: str, new: str) -> None:
         rows = self._q("SELECT password_hash FROM users WHERE email = ?", (email,))
-        if not rows or not verify_password(current or "", rows[0][0]):
+        if not rows or not _bounded_verify(current or "", rows[0][0]):
             raise AuthError(403, "Your current password is incorrect.")
         if current == new:
             raise AuthError(422, "Choose a password you haven't used here.")
@@ -205,12 +216,14 @@ class Accounts:
                        (key, (now - WINDOW).isoformat()))[0][0]
 
     def _check_limits(self, ip: str, email: str, now: datetime) -> None:
-        if self._failures(f"{ip}|{email}", now) >= PAIR_LIMIT or self._failures(f"{ip}|*", now) >= IP_LIMIT:
+        if (self._failures(f"{ip}|{email}", now) >= PAIR_LIMIT or self._failures(f"{ip}|*", now) >= IP_LIMIT
+                or self._failures(f"*|{email}", now) >= ACCOUNT_LIMIT):
             raise AuthError(429, "Too many attempts. Wait 15 minutes, then try again.")
 
     def _fail(self, ip: str, email: str, now: datetime) -> None:
-        self._q("INSERT INTO login_failures VALUES (?, ?), (?, ?)",
-                (f"{ip}|{email}", now.isoformat(), f"{ip}|*", now.isoformat()))
+        at = now.isoformat()
+        self._q("INSERT INTO login_failures VALUES (?, ?), (?, ?), (?, ?)",
+                (f"{ip}|{email}", at, f"{ip}|*", at, f"*|{email}", at))
         self._q("DELETE FROM login_failures WHERE at < ?", ((now - WINDOW * 4).isoformat(),))
 
     def _new_session(self, email: str, limited: bool = False, via: str = "password") -> str:
@@ -227,7 +240,7 @@ class Accounts:
         self._check_limits(ip, email, now)
         rows = self._q("SELECT org_id, role, password_hash, disabled, totp_enc FROM users WHERE email = ?", (email,))
         stored = rows[0][2] if rows else DUMMY_HASH
-        ok = verify_password(password or "", stored) and bool(rows) and not rows[0][3]
+        ok = _bounded_verify(password or "", stored) and bool(rows) and not rows[0][3]
         if not ok:
             self._fail(ip, email, now)
             raise AuthError(401, "Email or password is incorrect.")
@@ -336,7 +349,7 @@ class Accounts:
 
     def disable_two_step(self, email: str, password: str, code: str) -> None:
         rows = self._q("SELECT password_hash FROM users WHERE email = ?", (email,))
-        if not rows or not verify_password(password or "", rows[0][0]):
+        if not rows or not _bounded_verify(password or "", rows[0][0]):
             raise AuthError(403, "Your password is incorrect.")
         if not self._check_code(email, code):
             raise AuthError(403, "That code didn't work.")

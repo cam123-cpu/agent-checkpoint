@@ -34,7 +34,6 @@ import json
 import ssl
 import threading
 import time
-import urllib.parse
 from collections import defaultdict, deque
 from dataclasses import dataclass, replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -99,6 +98,27 @@ class RateLimiter:
 
 class _Server(ThreadingHTTPServer):
     daemon_threads = True
+    max_connections = 200  # one thread per connection: cap them, so idle sockets can't exhaust memory
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._slots = threading.BoundedSemaphore(self.max_connections)
+
+    def process_request(self, request, client_address):
+        if not self._slots.acquire(blocking=False):
+            self.shutdown_request(request)  # over the cap: drop it immediately
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self._slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
 
     def handle_error(self, request, client_address):
         """Broken or non-TLS connections are routine on the internet: drop them without a traceback."""
@@ -151,13 +171,20 @@ def make_server(registry: Registry, host: str = "127.0.0.1", port: int = 8077, c
         def _scheme(self) -> str:
             if tls:
                 return "https"
-            if self._peer_trusted():
-                return self.headers.get("X-Forwarded-Proto", "http").split(",")[0].strip()
+            headers = getattr(self, "headers", None)
+            if headers is not None and self._peer_trusted() and headers.get("X-Forwarded-Proto"):
+                return headers["X-Forwarded-Proto"].split(",")[-1].strip()  # the value our proxy added
             return "http"
 
         def _ip(self) -> str:
-            if self._peer_trusted() and self.headers.get("X-Forwarded-For"):
-                return self.headers["X-Forwarded-For"].split(",")[0].strip()[:64]
+            """Walk X-Forwarded-For from the right: the first address that isn't one of our proxies is the client.
+            Anything further left was supplied by the client and can be forged."""
+            if not self._peer_trusted() or not self.headers.get("X-Forwarded-For"):
+                return self.client_address[0]
+            hops = [h.strip()[:64] for h in self.headers["X-Forwarded-For"].split(",") if h.strip()]
+            for hop in reversed(hops):
+                if hop not in cfg.trusted_proxies:
+                    return hop
             return self.client_address[0]
 
         def _send(self, status: int, body: bytes, ctype: str, extra: dict | None = None, page: bool = False):
@@ -203,7 +230,7 @@ def make_server(registry: Registry, host: str = "127.0.0.1", port: int = 8077, c
         def _body(self, allowed: set[str] | None = None) -> dict:
             try:
                 body = json.loads(self._read(MAX_JSON) or b"{}")
-            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            except (json.JSONDecodeError, UnicodeDecodeError, RecursionError) as exc:
                 raise HTTPError(400, "body is not JSON") from exc
             if not isinstance(body, dict):
                 raise HTTPError(400, "body must be a JSON object")
@@ -256,12 +283,12 @@ def make_server(registry: Registry, host: str = "127.0.0.1", port: int = 8077, c
                 org = qp("org")
                 loaded = sso_config(org)
                 if not loaded:
-                    return self._redirect("/?sso_error=" + urllib.parse.quote(SSOError("not_configured").message))
+                    return self._redirect("/?sso_error=not_configured")
                 state, nonce, verifier, binding = new_flow()
                 try:
                     url = oidc.authorize_url(loaded[0], redirect_uri, state, nonce, verifier)
                 except SSOError as exc:
-                    return self._redirect("/?sso_error=" + urllib.parse.quote(exc.message))
+                    return self._redirect("/?sso_error=" + exc.code)
                 accounts.sso_begin(org, state, nonce, verifier, binding)
                 # Lax, not Strict: it must come back on the provider's cross-site redirect to the callback.
                 return self._redirect(url, [f"{binding_cookie}={binding}; Path=/; HttpOnly; SameSite=Lax; Max-Age=600{secure}"])
@@ -282,7 +309,8 @@ def make_server(registry: Registry, host: str = "127.0.0.1", port: int = 8077, c
                 token, user = accounts.sso_session(email)
                 registry.gateway(org).org.ledger.append("account", "-", {"by": email, "event": "signed in with SSO"})
             except SSOError as exc:
-                return self._redirect("/?sso_error=" + urllib.parse.quote(exc.message), [clear])
+                # Only a fixed code travels in the URL; the page shows its own text for it (never URL text).
+                return self._redirect("/?sso_error=" + exc.code, [clear])
             session = f"{cookie_name}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={12 * 3600}{secure}"
             return self._redirect("/#approvals", [session, clear])
 
@@ -324,8 +352,8 @@ def make_server(registry: Registry, host: str = "127.0.0.1", port: int = 8077, c
                 return (query.get(name) or [default])[0][:200]
 
             if cfg.force_https and self._scheme() != "https" and path != "/health":
-                host = self.headers.get("Host", "")
-                raise HTTPError(308, "use https", {"Location": f"https://{host}{self.path}"})
+                base = cfg.public_origin or "https://" + self.headers.get("Host", "").split("/")[0]
+                raise HTTPError(308, "use https", {"Location": base + (self.path if self.path.startswith("/") else "/")})
             if m == "GET" and path in STATIC:
                 name, ctype = STATIC[path]
                 return self._send(200, _static(name), ctype, page=True)
@@ -537,6 +565,13 @@ def make_server(registry: Registry, host: str = "127.0.0.1", port: int = 8077, c
 
         def _handle(self):
             self._consumed = False
+            if self.headers.get("Transfer-Encoding"):
+                # Chunked bodies aren't supported. Refuse and close, so no part of the body can be read as
+                # another request on a reused connection (request smuggling).
+                self._consumed = True
+                self.close_connection = True
+                return self._json(501, {"error": "send the body with Content-Length, not Transfer-Encoding"},
+                                  {"Connection": "close"})
             try:
                 self._route()
             except HTTPError as exc:
@@ -560,6 +595,17 @@ def make_server(registry: Registry, host: str = "127.0.0.1", port: int = 8077, c
                 self.rfile.read(length)
             elif length:
                 self.close_connection = True
+
+        def send_error(self, code, message=None, explain=None):
+            """Malformed requests and unknown methods: a JSON error with the usual security headers, then close."""
+            self.close_connection = True
+            if not getattr(self, "request_version", "").startswith("HTTP/1"):
+                self.request_version = "HTTP/1.1"
+            try:
+                self._send(code, json.dumps({"error": (message or "bad request")[:200]}).encode(), "application/json",
+                           {"Connection": "close"})
+            except Exception:
+                pass
 
         def do_GET(self):
             self._handle()
