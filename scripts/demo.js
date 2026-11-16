@@ -36,7 +36,10 @@
       await new Promise((r) => setTimeout(r, 120));
       const [route, qs] = path.split("?");
       const params = new URLSearchParams(qs || "");
-      if (route === "login" && method === "POST") { signedIn = true; return D.me; }
+      if (route === "login" && method === "POST") { signedIn = true; return { signed_in: true }; }
+      if (route === "sso") return { enabled: false, label: "" };
+      if (route.startsWith("two-step/") || route === "password")
+        fail(403, "Account changes are turned off in this demo. In the real app this sets up two-step sign-in or changes your password.");
       if (route === "logout" && method === "POST") { signedIn = false; return { signed_out: true }; }
       if (!signedIn) fail(401, "Sign in to continue. In this demo any email and a 12-character password work.");
       if (route === "me") return D.me;

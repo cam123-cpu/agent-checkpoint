@@ -75,12 +75,15 @@ def seed(home: str, password: str | None = None):
 def snapshot(reg, gw) -> dict:
     return {
         "now": gw.clock().isoformat(),
-        "me": {"email": ADMIN, "role": "admin", "company": gw.org.name, "mode": gw.org.policy.mode},
+        "me": {"email": ADMIN, "role": "admin", "company": gw.org.name, "mode": gw.org.policy.mode, "two_step": True,
+               "setup_required": False, "require_two_step": True, "recovery_codes_left": 10},
         "overview": views.overview(gw), "tickets": views.tickets(gw), "activity": views.activity(gw, limit=10_000),
         "audit": views.audit(gw), "vendors": views.vendors(gw),
-        "settings": views.settings(gw, [{"email": ADMIN, "role": "admin", "disabled": False},
-                                        {"email": "cfo@acme-manufacturing.example", "role": "approver", "disabled": False},
-                                        {"email": "audit@acme-manufacturing.example", "role": "auditor", "disabled": False}]),
+        "settings": {**views.settings(gw, [
+            {"email": ADMIN, "role": "admin", "disabled": False, "two_step": True},
+            {"email": "cfo@acme-manufacturing.example", "role": "approver", "disabled": False, "two_step": True},
+            {"email": "audit@acme-manufacturing.example", "role": "auditor", "disabled": False, "two_step": True}]),
+            "require_two_step": True},
     }
 
 

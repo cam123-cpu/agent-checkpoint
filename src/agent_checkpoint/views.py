@@ -145,7 +145,7 @@ def settings(gw, users: list[dict]) -> dict:
     return {
         "mode": p.mode, "currency": p.currency, "approval_limit_cents": p.approval_limit_cents,
         "dual_approval_cents": p.dual_approval_cents, "recent_bank_change_days": p.recent_bank_change_days,
-        "ticket_hours": p.ticket_hours,
+        "ticket_hours": p.ticket_hours, "require_two_step": p.require_two_step,
         "agents": [{"agent_id": a, "made_by": s.vendor, "allowed_actions": list(s.allowed_actions),
                     "max_amount_cents": s.max_amount_cents, "daily_cap_cents": s.daily_cap_cents}
                    for a, s in sorted(p.agents.items())],

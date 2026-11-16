@@ -1,5 +1,20 @@
-# TLS in front of the checkpoint. Caddy gets and renews the certificate automatically.
-#   agent-checkpoint serve --host 127.0.0.1 --port 8077 --force-https --public-origin https://checkpoint.example.com
+# Caddy terminates TLS (certificates obtained and renewed automatically) and forwards to the checkpoint.
+#
+#   agent-checkpoint serve --host 127.0.0.1 --port 8077 --force-https \
+#       --public-origin https://checkpoint.example.com --trusted-proxy 127.0.0.1
+#
+# Behind Cloudflare (recommended for bot protection, see DEPLOY.md), uncomment the global block
+# and paste Cloudflare's current ranges from https://www.cloudflare.com/ips/ so the checkpoint sees
+# each visitor's real address (its sign-in limits are per address).
+
+# {
+# 	servers {
+# 		trusted_proxies static <paste Cloudflare IPv4 and IPv6 ranges here>
+# 		client_ip_headers CF-Connecting-IP
+# 	}
+# }
+
 checkpoint.example.com {
+	encode zstd gzip
 	reverse_proxy 127.0.0.1:8077
 }

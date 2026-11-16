@@ -124,6 +124,35 @@ def cmd_set_password(args) -> int:
     return 0
 
 
+def cmd_reset_two_step(args) -> int:
+    _registry(args).accounts().reset_two_step(args.email)
+    print(f"two-step sign-in reset for {args.email}; they set it up again at their next sign-in")
+    return 0
+
+
+def cmd_set_sso(args) -> int:
+    from .oidc import SSOConfig
+    reg = _registry(args)
+    secret = sys.stdin.readline().strip()
+    if not secret:
+        raise ValueError("pipe the client secret on stdin")
+    cfg = SSOConfig(args.provider, args.client_id, args.tenant or "", args.domain or "", args.issuer or "")
+    cfg.save(reg.org_dir(args.org), secret)
+    print(f"single sign-on with {cfg.label} is on for {args.org}.")
+    print("Redirect URI to register with the provider: <public origin>/auth/sso/callback")
+    print(f"Sign-in link for your people: <public origin>/?org={args.org}")
+    return 0
+
+
+def cmd_remove_sso(args) -> int:
+    d = _registry(args).org_dir(args.org)
+    for f in ("sso.json", "sso.secret"):
+        if os.path.exists(os.path.join(d, f)):
+            os.remove(os.path.join(d, f))
+    print(f"single sign-on turned off for {args.org}")
+    return 0
+
+
 def cmd_set_mode(args) -> int:
     reg = _registry(args)
     reg.save_policy(args.org, replace(reg.policy(args.org), mode=args.mode))
@@ -221,6 +250,14 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(fn=cmd_add_user)
     s = sub.add_parser("set-password"); s.add_argument("email"); s.add_argument("--password-stdin", action="store_true")
     s.set_defaults(fn=cmd_set_password)
+    s = sub.add_parser("reset-two-step", help="for someone who lost their phone and recovery codes")
+    s.add_argument("email"); s.set_defaults(fn=cmd_reset_two_step)
+    s = sub.add_parser("set-sso", help="single sign-on; reads the client secret from stdin")
+    s.add_argument("org"); s.add_argument("--provider", choices=["microsoft", "google", "oidc"], required=True)
+    s.add_argument("--client-id", required=True); s.add_argument("--tenant", help="Microsoft tenant id")
+    s.add_argument("--domain", help="only allow emails at this domain"); s.add_argument("--issuer", help="oidc issuer URL")
+    s.set_defaults(fn=cmd_set_sso)
+    s = sub.add_parser("remove-sso"); s.add_argument("org"); s.set_defaults(fn=cmd_remove_sso)
     for name, dis in (("disable-user", True), ("enable-user", False)):
         s = sub.add_parser(name); s.add_argument("email"); s.set_defaults(fn=lambda a, d=dis: cmd_user_state(a, d))
     s = sub.add_parser("set-mode"); s.add_argument("org"); s.add_argument("mode", choices=["shadow", "enforce"])
