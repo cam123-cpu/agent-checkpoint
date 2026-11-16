@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from .checks import Context, _sender_strings, domain_of, evaluate, learned_weights
-from .intel import Intel
+from .intel import Intel, shared_domain
 from .ledger import Ledger
 from .models import RANK, ActionRequest, Decision, Finding, Verdict, money
 from .notify import Notifier
@@ -336,21 +336,43 @@ class Gateway:
         self._report_fraud(req)
         self.org.ledger.append("fraud_report", request_id, {"by": reporter})
 
+    def _reportable(self, req: ActionRequest) -> tuple[set[str], set[str]]:
+        """What a fraud report on this request would list: only what the fraudster supplied."""
+        vendor = self.org.store.vendor(req.vendor_id)
+        on_file = norm_account(vendor.bank_account) if vendor else ""
+        accounts = {a for a in {req.bank_account, req.bank_account_on_invoice} - {""}
+                    if norm_account(a) != on_file or req.action == "change_bank"}
+        # Only the address each message really came from, never the vendor's or our own domains, and never a
+        # free-mail domain: a report must not put a real company (or ourselves, or gmail.com) on the list.
+        protected = set(vendor.email_domains if vendor else ()) | set(self.org.policy.internal_domains)
+        domains = {d for d in {domain_of(s) for s in _sender_strings(req)} - protected - {""} if not shared_domain(d)}
+        return accounts, domains
+
     def _report_fraud(self, req: ActionRequest) -> None:
         if self.org.intel is None:
             return
-        vendor = self.org.store.vendor(req.vendor_id)
-        on_file = norm_account(vendor.bank_account) if vendor else ""
-        # Only what the fraudster supplied: never the vendor's real account or real domain.
-        accounts = {req.bank_account, req.bank_account_on_invoice} - {""}
+        accounts, domains = self._reportable(req)
         for acct in accounts:
-            if norm_account(acct) != on_file or req.action == "change_bank":
-                self.org.intel.report(self.org.org_id, account=acct)
-        # Only the address each message really came from, and never the vendor's or our own domains: a report
-        # must not put a real company (or ourselves) on everyone's block list.
-        protected = set(vendor.email_domains if vendor else ()) | set(self.org.policy.internal_domains)
-        for d in {domain_of(s) for s in _sender_strings(req)} - protected - {""}:
+            self.org.intel.report(self.org.org_id, account=acct)
+        for d in domains:
             self.org.intel.report(self.org.org_id, domain=d)
+
+    def withdraw_report(self, request_id: str, person: str, reason: str = "") -> dict:
+        """Take back this company's fraud report for a request (it was the real vendor after all)."""
+        if person not in self.org.policy.approvers:
+            raise CheckpointError(403, "only approvers can withdraw a fraud report")
+        stored = self.org.store.get_request(request_id)
+        if stored is None or self.org.intel is None:
+            raise CheckpointError(404, "no such request")
+        req = ActionRequest.from_stored(stored)
+        accounts, domains = self._reportable(req)
+        n = sum(self.org.intel.withdraw(self.org.org_id, account=a) for a in accounts)
+        n += sum(self.org.intel.withdraw(self.org.org_id, domain=d) for d in domains)
+        if not n:
+            raise CheckpointError(404, "this company has no fraud report for that request")
+        self.org.ledger.append("fraud_report_withdrawn", request_id, {"by": person, "reason": reason[:500],
+                                                                      "entries": n})
+        return {"request_id": request_id, "withdrawn": n}
 
     def expire(self) -> list[str]:
         now, done = self.clock(), []

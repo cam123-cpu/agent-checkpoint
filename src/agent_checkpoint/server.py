@@ -402,6 +402,10 @@ def make_server(registry: Registry, host: str = "127.0.0.1", port: int = 8077, c
             if path == "/v1/fraud-reports" and m == "POST":
                 gw.report_fraud(str(self._body({"request_id"}).get("request_id", "")), who["name"])
                 return self._json(200, {"reported": True})
+            if path == "/v1/fraud-reports/withdraw" and m == "POST":
+                b = self._body({"request_id", "reason"})
+                return self._json(200, gw.withdraw_report(str(b.get("request_id", "")), who["name"],
+                                                          str(b.get("reason", ""))[:500]))
             if path == "/v1/report" and m == "GET":
                 return self._json(200, shadow_report(gw.org.ledger, qp("since"), qp("until")))
             if path == "/v1/ledger/verify" and m == "GET":

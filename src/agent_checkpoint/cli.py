@@ -226,6 +226,11 @@ def cmd_resolve(args, approve: bool) -> int:
     return 0
 
 
+def cmd_withdraw_report(args) -> int:
+    print(json.dumps(_registry(args).gateway(args.org).withdraw_report(args.request, args.as_, args.reason), indent=2))
+    return 0
+
+
 def cmd_report(args) -> int:
     rep = shadow_report(_registry(args).gateway(args.org).org.ledger, args.since or "", args.until or "")
     print(json.dumps(rep, indent=2) if args.json else render_text(rep))
@@ -296,6 +301,9 @@ def build_parser() -> argparse.ArgumentParser:
         else:
             s.add_argument("--fraud", action="store_true", help="report to the shared fraud network")
         s.set_defaults(fn=lambda a, ap=approve: cmd_resolve(a, ap))
+    s = sub.add_parser("withdraw-report", help="take back your company's fraud report for a request")
+    s.add_argument("org"); s.add_argument("request"); s.add_argument("--as", dest="as_", required=True)
+    s.add_argument("--reason", default=""); s.set_defaults(fn=cmd_withdraw_report)
     s = sub.add_parser("report"); s.add_argument("org"); s.add_argument("--since"); s.add_argument("--until")
     s.add_argument("--json", action="store_true"); s.set_defaults(fn=cmd_report)
     s = sub.add_parser("verify"); s.add_argument("org"); s.add_argument("--expect", help='published head JSON')

@@ -172,19 +172,24 @@ def _accounts_in_play(req, ctx) -> list[str]:
 
 
 def check_fraud_network(req, ctx):
+    """Your own report blocks. One other company's report pauses; two or more block."""
     if ctx.intel is None:
         return []
     out = []
-    for acct in _accounts_in_play(req, ctx):
-        n = ctx.intel.account_reports(acct)
-        if n:
-            out.append(Finding("known_fraud", B, f"Account {last4(acct)} was reported as fraud by {n} "
-                                                 f"compan{'y' if n == 1 else 'ies'} on the network", 0.99))
-    for d in set(_senders(req)):
-        n = ctx.intel.domain_reports(d)
-        if n:
-            out.append(Finding("known_fraud", B, f"Requests from {d} were reported as fraud by {n} "
-                                                 f"compan{'y' if n == 1 else 'ies'} on the network", 0.97))
+    items = [("account", a, f"Account {last4(a)}") for a in _accounts_in_play(req, ctx)]
+    items += [("domain", d, f"Requests from {d}") for d in sorted(set(_senders(req)))]
+    for kind, value, what in items:
+        own, others = ctx.intel.standing(kind, value, ctx.org_id)
+        if own:
+            out.append(Finding("known_fraud", B, f"{what} {'was' if kind == 'account' else 'were'} reported as fraud by "
+                                                 "your company", 0.99))
+        elif others >= 2:
+            out.append(Finding("known_fraud", B, f"{what} {'was' if kind == 'account' else 'were'} reported as fraud by "
+                                                 f"{others} other companies on the network", 0.97))
+        elif others == 1:
+            out.append(Finding("network_report", P, f"{what} {'was' if kind == 'account' else 'were'} reported as fraud "
+                                                    "by one other company on the network. One report doesn't block; "
+                                                    "check it with the vendor before paying.", 0.6))
     return out
 
 

@@ -149,6 +149,7 @@ def audit(gw, limit: int = 100) -> dict:
             "executed": lambda: f"{b.get('action', '')} {b.get('status', '')}",
             "rejected": lambda: "malformed request refused",
             "fraud_report": lambda: f"reported to fraud network by {b.get('by', '')}",
+            "fraud_report_withdrawn": lambda: f"fraud report withdrawn by {b.get('by', '')}",
             "execution_failed": lambda: "payment rail refused the receipt",
             "payment_run_checked": lambda: (
                 f"{b.get('by', 'someone')} checked a payment file: "
