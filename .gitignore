@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.venv/
+build/
+dist/
+# Company data, keys and ledgers: never commit
+checkpoint-data/
+*.db
+*.db-wal
+*.db-shm
+*.pem
+*.key
+keys.json
+notify.json
