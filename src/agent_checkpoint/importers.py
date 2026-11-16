@@ -241,10 +241,15 @@ def import_history(store: Store, text: str, date_order: str = "mdy") -> tuple[in
             if paid > date.today():
                 raise ValueError("payment date is in the future")
             cents = parse_amount(r["amount"])
-            acct = r.get("bank_account") or v.bank_account
+            # A refund pays the account stored on the original payment. History must not be able to
+            # name a different one. A blank column uses the account on file.
+            named = (r.get("bank_account") or "").strip()
+            if named and norm_account(named) != norm_account(v.bank_account):
+                raise ValueError(f"{v.vendor_id}: the account in the history file is not the account on file. "
+                                 "That file records what was paid, and it cannot choose where a later refund goes")
             ident = hashlib.sha256(f"{v.vendor_id}|{norm_invoice(r['invoice_number'])}|{paid}|{cents}".encode()).hexdigest()
             rows.append(Payment(f"hist-{ident[:24]}", "history", v.vendor_id, norm_invoice(r["invoice_number"]), cents,
-                                norm_account(acct), paid, "pay", "imported"))
+                                norm_account(v.bank_account), paid, "pay", "imported"))
         except ValueError as exc:
             errors.append(f"line {n}: {exc}")
     added = 0

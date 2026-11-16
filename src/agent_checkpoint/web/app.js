@@ -993,7 +993,7 @@
     if (sampleBtn) sampleBtn.addEventListener("click", () => results.replaceChildren(...runResults(sample, "the sample payment run")));
     return [
       h("h1", { text: "Check a payment run" }),
-      h("p", { class: "lede", text: "Upload the bills you're about to pay, before you release them. Each one goes through the same checks as an agent's payment: the bank account on file, duplicates (in this file and in past payments), purchase orders, splits, unusual amounts and your approval limits. Nothing is paid or changed; the check is recorded in the audit log." }),
+      h("p", { class: "lede", text: "Upload the bills you're about to pay, before you release them. Each line is checked against the account on file, duplicates in this file and in past payments, purchase orders, splits and unusual amounts. A line is not held only because it is over the approval limit: you are already releasing this file. Nothing is paid or changed; the check is recorded in the audit log." }),
       h("div", { class: "panel" },
         field("run-file", "Payment run (CSV)", input, "Needs: vendor and amount. Also useful: invoice number, bank account the payment goes to, PO number. Up to 1 MB."),
         h("div", { class: "row" }, go, sampleBtn),
