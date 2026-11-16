@@ -9,7 +9,7 @@ from datetime import date
 import pytest
 from test_web_security import PW, Client
 
-from agent_checkpoint.importers import import_history, map_headers, parse_date, read_payment_run
+from agent_checkpoint.importers import import_history, import_vendors, map_headers, parse_date, read_payment_run
 from agent_checkpoint.server import ServerConfig, make_server
 from agent_checkpoint.store import PurchaseOrder, Store, Vendor
 from agent_checkpoint.tenancy import Registry
@@ -48,6 +48,23 @@ def history_csv(rows):
 
 
 # --- importing --------------------------------------------------------------------------
+
+def test_reimport_cannot_blank_or_replace_the_phone_or_the_domains(site):
+    reg, gw, as_, _ = site
+    store = gw.org.store
+    before = store.vendor("V1")
+    # No phone or domain columns: a refresh of the vendor file must not wipe the callback number.
+    n, errors = import_vendors(store, f"vendor_id,name,bank_account\nV1,Northwind Supplies,{ACCT}\n")
+    assert n == 1 and errors == []
+    kept = store.vendor("V1")
+    assert kept.phone == before.phone and kept.email_domains == before.email_domains
+    # A file that names a different phone or domain is refused. The bank account is untouched.
+    n, errors = import_vendors(store, "vendor_id,name,bank_account,email_domains,phone\n"
+                               f"V1,Northwind Supplies,{ACCT},evil.example,+1 999 555 0199\n")
+    assert n == 0 and any("on file" in e for e in errors)
+    assert store.vendor("V1").phone == before.phone
+    assert store.vendor("V1").email_domains == before.email_domains
+
 
 def test_columns_are_matched_by_meaning():
     m = map_headers(["Supplier", "Invoice #", "Amount Paid", "Payment Date", "Remittance email"],

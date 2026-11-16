@@ -126,14 +126,13 @@ a paid invoice, and a payment to a vendor that doesn't exist.
 |---|---|---|
 | Incidents stopped | 113 / 120 | 113 / 120 |
 | Over-limit / bank-change actions sent to a human | 68 / 68 | 68 / 68 |
-| Clean actions interrupted | 7 / 536 (1.3%)\* | **1 / 536 (0.2%)** |
+| Clean actions interrupted | 6 / 536 (1.1%)\* | **1 / 536 (0.2%)** |
 | Money lost to incidents | $1,378,500 (it only watches) | $45,900 |
 | Slowest decision | < 2 ms | < 2 ms |
 
-\*Shadow still tells the agent to proceed, and it records the payments the agent would have made.
-A bank change the checks would have blocked is not written into the vendor list, so later clean
-invoices no longer clash with a fraudulent account. Those 7 clean interruptions are six splits
-that look like a normal second bill, and one unusual amount.
+\*Shadow still tells the agent to proceed. A block is recorded and is not written into the books:
+not the vendor's account, not the payment, and not the purchase order. Those 6 clean interruptions
+are splits that look like a normal second bill.
 
 **The 7 misses are honest misses.** Six are the *first* half of a split payment, which looks
 normal on its own (the second half is always caught). One is a 3x amount at a vendor whose
@@ -227,7 +226,7 @@ for the design.
 
 ```bash
 pip install -e ".[dev]"
-pytest -q          # 199 tests, plus a real browser when Playwright is installed: checks, approvals, receipts,
+pytest -q          # 200 tests, plus a real browser when Playwright is installed: checks, approvals, receipts,
                    # ledger tampering, network, MCP (incl. a real stdio process), HTTP, CLI, quality bar,
                    # the security checklist, and design rules
 ruff check src tests scripts
