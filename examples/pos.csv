@@ -1,0 +1,4 @@
+number,vendor_id,amount,billed
+PO-1001,V-CONTO,4800.00,
+PO-1002,V-NORTH,6200.00,
+PO-1003,V-FABRI,"12,500.00",3100.00

@@ -1,0 +1,4 @@
+vendor_id,name,bank_account,email_domains,created_on,phone
+V-NORTH,Northwind Supplies,US00021000001234,northwind-supplies.com,2024-01-15,+1 415 555 0100
+V-CONTO,Contoso Packaging,US00021000005678,contoso.com;contoso-billing.com,2024-03-02,+1 415 555 0101
+V-FABRI,Fabrikam Freight,US00021000009012,fabrikam.com,2023-11-20,+1 415 555 0102

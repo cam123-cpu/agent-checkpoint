@@ -1,0 +1,35 @@
+name: ci
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python: ["3.11", "3.12", "3.13"]
+        include:
+          - os: macos-latest
+            python: "3.13"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install -e ".[dev]"
+      - run: ruff check src tests
+      - run: pytest -q
+      - name: Simulated quarter (quality bar is also enforced in tests)
+        run: agent-checkpoint simulate --seeds 10
+      - name: MCP smoke test
+        run: |
+          agent-checkpoint --home /tmp/cp demo > /tmp/demo.json
+          KEY=$(python -c "import json; print(json.load(open('/tmp/demo.json'))['agent_key'])")
+          printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}' \
+            '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+            | CHECKPOINT_AGENT_KEY=$KEY agent-checkpoint --home /tmp/cp mcp | tee /tmp/out.jsonl
+          grep -q pay_invoice /tmp/out.jsonl
