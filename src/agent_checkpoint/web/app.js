@@ -116,6 +116,7 @@
     "audit-log": { title: "Audit log", render: renderAudit },
     vendors: { title: "Vendors", render: renderVendors },
     "company-settings": { title: "Settings", render: renderSettings },
+    account: { title: "Your account", render: renderAccount, hidden: true },
   };
 
   function currentPage() {
@@ -128,10 +129,11 @@
     try {
       state.me = await api.get("me");
     } catch (e) {
-      if (e.status === 401) return renderSignIn();
+      if (e.status === 401) return renderSignIn(new URLSearchParams(location.search).get("sso_error") || undefined);
       root.replaceChildren(h("main", { class: "page" }, errorBox(e)));
       return;
     }
+    if (state.me.setup_required) return renderSetupRequired();
     render();
   }
 
@@ -156,7 +158,7 @@
     const me = state.me;
     const enforcing = me.mode === "enforce";
     const tabs = h("nav", { class: "tabs", "aria-label": "Sections" },
-      Object.entries(PAGES).map(([key, p]) => h("a", {
+      Object.entries(PAGES).filter(([, p]) => !p.hidden).map(([key, p]) => h("a", {
         href: "#" + key, "aria-current": key === active ? "page" : false,
       }, p.title, key === "approvals" && state.waiting ? h("span", { class: "count", text: " (" + state.waiting + ")" }) : null)));
     return h("div", {},
@@ -166,7 +168,7 @@
           h("span", { class: "brand", text: "Checkpoint" }),
           h("span", { class: "company", text: me.company }),
           h("div", { class: "who" },
-            h("span", { class: "who-name", title: me.email, text: me.email + " (" + me.role + ")" }),
+            h("a", { class: "who-name", href: "#account", title: "Your account", text: me.email + " (" + me.role + ")" }),
             h("button", { class: "plain", type: "button", onclick: signOut }, "Sign out"))),
         h("div", { class: "mode " + me.mode },
           h("p", {},
@@ -202,9 +204,10 @@
       submit.disabled = true;
       submit.textContent = "Signing in";
       try {
-        await api.post("login", { email: email.value, password: password.value, website: honeypot.value });
+        const out = await api.post("login", { email: email.value, password: password.value, website: honeypot.value });
         password.value = "";
-        location.hash = "#approvals";
+        if (out.two_step_required) return renderCodeStep(out.pending);
+        if (!PAGES[currentPage()] || currentPage() === "account") location.hash = "#approvals";
         await start();
       } catch (e) {
         err.textContent = e.message;
@@ -217,12 +220,191 @@
       h("div", { class: "field" }, h("label", { for: "password", text: "Password" }), password),
       h("div", { class: "hp", "aria-hidden": "true" }, h("label", { for: "website", text: "Leave this empty" }), honeypot),
       err, submit);
+    const sso = h("div", { hidden: true });
     root.replaceChildren(h("main", { class: "signin" },
       h("h1", { text: "Checkpoint" }),
       h("p", { class: "muted", text: "Review and approve what your AI agents want to do with your company's money." }),
       message ? h("p", { class: "notice", role: "status", text: message }) : null,
-      h("div", { class: "panel" }, form)));
+      h("div", { class: "panel" }, sso, form)));
     email.focus();
+    // A company's sign-in link carries ?org=<id>; if that company uses single sign-on, offer it first.
+    const org = new URLSearchParams(location.search).get("org");
+    if (org && /^[a-z0-9-]{2,41}$/.test(org)) {
+      api.get("sso?org=" + encodeURIComponent(org)).then((r) => {
+        if (!r.enabled) return;
+        const go = h("button", { type: "button" }, "Sign in with " + r.label);
+        go.addEventListener("click", () => { location.assign("/auth/sso/start?org=" + encodeURIComponent(org)); });
+        sso.replaceChildren(go, h("p", { class: "small muted divider", text: "Or sign in with your email and password" }));
+        sso.hidden = false;
+      }).catch(() => {});
+    }
+  }
+
+  function renderCodeStep(pending) {
+    let recovery = false;
+    const err = h("p", { class: "notice error", role: "alert", hidden: true });
+    const label = h("label", { for: "code", text: "6-digit code from your authenticator app" });
+    const code = h("input", { type: "text", id: "code", name: "code", inputmode: "numeric", autocomplete: "one-time-code",
+      maxlength: "20", required: true });
+    const submit = h("button", { type: "submit" }, "Continue");
+    const swap = h("button", { type: "button", class: "plain" }, "Use a recovery code instead");
+    swap.addEventListener("click", () => {
+      recovery = !recovery;
+      label.textContent = recovery ? "Recovery code (each works once)" : "6-digit code from your authenticator app";
+      code.setAttribute("inputmode", recovery ? "text" : "numeric");
+      swap.textContent = recovery ? "Use a code from the app instead" : "Use a recovery code instead";
+      code.value = "";
+      code.focus();
+    });
+    const form = h("form", { novalidate: true, onsubmit: async (ev) => {
+      ev.preventDefault();
+      err.hidden = true;
+      submit.disabled = true;
+      try {
+        await api.post("login/two-step", { pending, code: code.value.trim() });
+        location.hash = "#approvals";
+        await start();
+      } catch (e) {
+        err.textContent = e.message;
+        err.hidden = false;
+        submit.disabled = false;
+        if (e.status === 401 && /expired/.test(e.message)) setTimeout(() => renderSignIn(e.message), 1200);
+      }
+    } }, h("div", { class: "field" }, label, code), err, submit, h("p", {}, swap));
+    root.replaceChildren(h("main", { class: "signin" },
+      h("h1", { text: "Two-step sign-in" }),
+      h("p", { class: "muted", text: "Open your authenticator app and enter the current code for Checkpoint." }),
+      h("div", { class: "panel" }, form)));
+    code.focus();
+  }
+
+  // ---------- two-step set-up (account page, and forced set-up) ----------
+  function twoStepSetup(onDone) {
+    const box = h("div", {});
+    const err = h("p", { class: "notice error", role: "alert", hidden: true });
+    const begin = h("button", { type: "button" }, "Set up two-step sign-in");
+    begin.addEventListener("click", async () => {
+      begin.disabled = true;
+      err.hidden = true;
+      try {
+        const s = await api.post("two-step/start");
+        const code = h("input", { type: "text", id: "setup-code", inputmode: "numeric", autocomplete: "one-time-code", maxlength: "7" });
+        const confirm = h("button", { type: "submit" }, "Turn on two-step sign-in");
+        const copyKey = h("button", { type: "button", class: "secondary" }, "Copy key");
+        copyKey.addEventListener("click", () => copyText(s.key.replace(/ /g, ""), "Key copied"));
+        const form = h("form", { novalidate: true, onsubmit: async (ev) => {
+          ev.preventDefault();
+          err.hidden = true;
+          confirm.disabled = true;
+          try {
+            const out = await api.post("two-step/confirm", { code: code.value.trim() });
+            box.replaceChildren(recoveryCodes(out.recovery_codes, onDone));
+          } catch (e) {
+            err.textContent = e.message;
+            err.hidden = false;
+            confirm.disabled = false;
+          }
+        } },
+          h("ol", { class: "steps" },
+            h("li", {}, h("p", { text: "Open an authenticator app on your phone (for example Google Authenticator, Microsoft Authenticator or 1Password) and scan this code." }),
+              h("img", { class: "qr", src: s.qr, width: "220", height: "220", alt: "QR code for adding Checkpoint to an authenticator app" })),
+            h("li", {}, h("p", { text: "Can't scan it? Choose to enter a setup key in the app, and type this key:" }),
+              h("p", { class: "key", text: s.key }), copyKey),
+            h("li", {}, h("label", { for: "setup-code", text: "Enter the 6-digit code the app shows" }), code)),
+          err, confirm);
+        box.replaceChildren(form);
+        code.focus();
+      } catch (e) {
+        err.textContent = e.message;
+        err.hidden = false;
+        begin.disabled = false;
+      }
+    });
+    box.append(begin, err);
+    return box;
+  }
+
+  function recoveryCodes(codes, onDone) {
+    const done = h("button", { type: "button" }, "I've saved my recovery codes");
+    done.addEventListener("click", onDone);
+    const copy = h("button", { type: "button", class: "secondary" }, "Copy codes");
+    copy.addEventListener("click", () => copyText(codes.join("\n"), "Recovery codes copied"));
+    return h("div", { class: "panel" },
+      h("h2", { text: "Two-step sign-in is on" }),
+      h("p", { text: "Save these recovery codes somewhere safe, like a password manager. If you lose your phone, each code lets you sign in once. They won't be shown again." }),
+      h("ul", { class: "codes" }, codes.map((c) => h("li", { class: "code", text: c }))),
+      h("div", { class: "row" }, done, copy));
+  }
+
+  async function copyText(text, message) {
+    try {
+      await navigator.clipboard.writeText(text);
+      toast(message);
+    } catch (e) {
+      toast("Copying isn't allowed here. Select the text and copy it instead.");
+    }
+  }
+
+  function renderSetupRequired() {
+    document.title = "Set up two-step sign-in | Checkpoint";
+    root.replaceChildren(h("main", { class: "signin" },
+      h("h1", { text: "Set up two-step sign-in" }),
+      h("p", { class: "muted", text: state.me.company + " requires a code from an authenticator app each time you sign in with a password. It takes about a minute." }),
+      h("div", { class: "panel" }, twoStepSetup(async () => { location.hash = "#approvals"; await start(); })),
+      h("p", {}, h("button", { type: "button", class: "plain", onclick: signOut }, "Sign out"))));
+  }
+
+  // ---------- your account ----------
+  async function renderAccount() {
+    const me = await api.get("me");
+    state.me = me;
+    let twoStep;
+    if (!me.two_step) {
+      twoStep = h("section", { class: "panel" }, h("h2", { text: "Two-step sign-in" }),
+        h("p", { text: "Off. Turn it on so a stolen password alone can't be used to approve payments." }),
+        twoStepSetup(() => render()));
+    } else {
+      const pw = h("input", { type: "password", id: "off-pw", autocomplete: "current-password" });
+      const code = h("input", { type: "text", id: "off-code", inputmode: "numeric", autocomplete: "one-time-code", maxlength: "20" });
+      const msg = h("p", { class: "notice error", role: "alert", hidden: true });
+      const off = h("button", { type: "submit", class: "danger" }, "Turn off two-step sign-in");
+      twoStep = h("section", { class: "panel" }, h("h2", { text: "Two-step sign-in" }),
+        h("p", { text: "On. " + count(me.recovery_codes_left, "recovery code", "recovery codes") + " left." + (me.recovery_codes_left < 3 ? " Ask an admin to reset two-step sign-in if you run out." : "") }),
+        me.require_two_step ? h("p", { class: "muted", text: me.company + " requires two-step sign-in, so it stays on." }) :
+          h("form", { novalidate: true, onsubmit: async (ev) => {
+            ev.preventDefault();
+            msg.hidden = true;
+            try {
+              await api.post("two-step/disable", { password: pw.value, code: code.value.trim() });
+              renderSignIn("Two-step sign-in is off. Sign in again.");
+            } catch (e) { msg.textContent = e.message; msg.hidden = false; }
+          } },
+            h("div", { class: "field" }, h("label", { for: "off-pw", text: "Password" }), pw),
+            h("div", { class: "field" }, h("label", { for: "off-code", text: "Code from your app, or a recovery code" }), code),
+            msg, h("div", { class: "row" }, off)));
+    }
+    const cur = h("input", { type: "password", id: "pw-cur", autocomplete: "current-password" });
+    const nw = h("input", { type: "password", id: "pw-new", autocomplete: "new-password", minlength: "12" });
+    const again = h("input", { type: "password", id: "pw-again", autocomplete: "new-password" });
+    const pmsg = h("p", { class: "notice error", role: "alert", hidden: true });
+    const password = h("form", { class: "panel", novalidate: true, onsubmit: async (ev) => {
+      ev.preventDefault();
+      pmsg.hidden = true;
+      if (nw.value !== again.value) { pmsg.textContent = "The new passwords don't match."; pmsg.hidden = false; return; }
+      try {
+        await api.post("password", { current: cur.value, new: nw.value });
+        renderSignIn("Password changed. Sign in with your new password.");
+      } catch (e) { pmsg.textContent = e.message; pmsg.hidden = false; }
+    } },
+      h("h2", { text: "Change password" }),
+      h("div", { class: "field" }, h("label", { for: "pw-cur", text: "Current password" }), cur),
+      h("div", { class: "field" }, h("label", { for: "pw-new", text: "New password" }), nw,
+        h("p", { class: "hint", text: "At least 12 characters. A few unrelated words works well." })),
+      h("div", { class: "field" }, h("label", { for: "pw-again", text: "New password again" }), again),
+      pmsg, h("div", { class: "row" }, h("button", { type: "submit" }, "Change password")),
+      h("p", { class: "small muted", text: "Changing your password signs you out everywhere." }));
+    return [h("h1", { text: "Your account" }), h("p", { class: "lede", text: me.email + ", " + me.role + " at " + me.company + "." }),
+      twoStep, password];
   }
 
   // ---------- approvals ----------
@@ -473,6 +655,7 @@
     const dual = h("input", { type: "text", inputmode: "decimal", id: "s-dual", value: dollars(s.dual_approval_cents), disabled: !isAdmin });
     const days = h("input", { type: "number", id: "s-days", min: "1", max: "365", value: s.recent_bank_change_days, disabled: !isAdmin });
     const hours = h("input", { type: "number", id: "s-hours", min: "1", max: "720", value: s.ticket_hours, disabled: !isAdmin });
+    const require2 = h("input", { type: "checkbox", id: "s-2step", checked: s.require_two_step, disabled: !isAdmin });
     const save = h("button", { type: "submit" }, "Save settings");
     const form = h("form", { class: "panel", onsubmit: async (ev) => {
       ev.preventDefault();
@@ -482,6 +665,7 @@
         await api.post("settings", {
           mode: modeEnforce.checked ? "enforce" : "shadow", approval_limit: limit.value.trim(),
           dual_approval_limit: dual.value.trim(), recent_bank_change_days: Number(days.value), ticket_hours: Number(hours.value),
+          require_two_step: require2.checked,
         });
         state.me = await api.get("me");
         toast("Settings saved");
@@ -501,6 +685,9 @@
       h("div", { class: "field" }, h("label", { for: "s-dual", text: "At or above this amount, two different people must approve (USD)" }), dual),
       h("div", { class: "field" }, h("label", { for: "s-days", text: "Hold payments to a newly changed bank account for this many days" }), days),
       h("div", { class: "field" }, h("label", { for: "s-hours", text: "Reject requests nobody answers within this many hours" }), hours),
+      h("div", { class: "field" }, h("label", { class: "check", for: "s-2step" }, require2,
+        h("span", { text: "Require two-step sign-in for everyone who signs in with a password" })),
+        h("p", { class: "hint", text: "People without it are asked to set it up at their next sign-in. Company single sign-on counts as two-step." })),
       isAdmin ? h("div", { class: "row" }, save, msg) : h("p", { class: "muted", text: "Only admins can change these." }));
 
     const imports = isAdmin ? h("section", { class: "panel" },
@@ -520,7 +707,9 @@
             h("td", { class: "num", text: money(a.max_amount_cents) }), h("td", { class: "num", text: money(a.daily_cap_cents) }))))))),
       h("section", { class: "panel" }, h("h2", { text: "People" }),
         h("table", { class: "statement" }, h("tbody", {}, s.users.map((u) => h("tr", {},
-          h("td", { text: u.email }), h("td", { class: "num", text: u.role + (u.disabled ? ", disabled" : "") })))))),
+          h("td", { text: u.email }),
+          h("td", { class: "muted", text: u.two_step ? "Two-step on" : "Two-step off" }),
+          h("td", { class: "num", text: u.role + (u.disabled ? ", disabled" : "") })))))),
       imports,
     ];
   }

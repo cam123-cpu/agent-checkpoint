@@ -2,7 +2,8 @@
 
 Agents (Bearer agent key)                 People (session cookie, from /api/web/login)
   POST /v1/actions                          GET  /                       the web app
-  GET  /v1/actions/<request_id>             POST /api/web/login | logout,  GET /api/web/me
+  GET  /v1/actions/<request_id>             POST /api/web/login, login/two-step, logout;  GET /api/web/me
+                                            POST /api/web/two-step/start | confirm | disable, /api/web/password
   GET  /v1/vendors?q=                       GET  /api/web/overview | tickets | activity | audit | vendors | settings
 Approvers (Bearer approver key)             POST /api/web/tickets/<id>  approve or reject
   GET  /v1/tickets, POST /v1/tickets/<id>   POST /api/web/settings       admin
@@ -28,21 +29,24 @@ Security, in the order a request meets it:
 
 from __future__ import annotations
 
+import base64
 import json
 import ssl
 import threading
 import time
+import urllib.parse
 from collections import defaultdict, deque
 from dataclasses import dataclass, replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import resources
 from urllib.parse import parse_qs, urlparse
 
-from . import views
+from . import qr, totp, views
 from .accounts import AuthError
 from .gateway import CheckpointError
 from .importers import import_pos, import_vendors
 from .models import parse_amount
+from .oidc import OIDC, SSOConfig, SSOError, new_flow
 from .report import shadow_report
 from .tenancy import Registry
 
@@ -116,8 +120,16 @@ def _static(name: str) -> bytes:
 
 
 def make_server(registry: Registry, host: str = "127.0.0.1", port: int = 8077, config: ServerConfig | None = None,
-                tls: tuple[str, str] | None = None) -> ThreadingHTTPServer:
+                tls: tuple[str, str] | None = None, oidc: OIDC | None = None) -> ThreadingHTTPServer:
     cfg = config or ServerConfig()
+    oidc = oidc or OIDC()
+    binding_cookie = "__Host-cp_sso" if cfg.secure_cookies else "cp_sso"
+
+    def sso_config(org_id: str):
+        try:
+            return SSOConfig.load(registry.org_dir(org_id)) if org_id else None
+        except (ValueError, OSError, TypeError):
+            return None
     limiter = RateLimiter(cfg.requests_per_minute)
     cookie_name = "__Host-cp_session" if cfg.secure_cookies else "cp_session"
     accounts = registry.accounts()
@@ -183,7 +195,9 @@ def make_server(registry: Registry, host: str = "127.0.0.1", port: int = 8077, c
                 raise HTTPError(400, "bad Content-Length") from exc
             if length < 0 or length > limit:
                 self.close_connection = True  # the unread body makes this connection unusable
+                self._consumed = True
                 raise HTTPError(413, "request body is too large", {"Connection": "close"})
+            self._consumed = True
             return self.rfile.read(length)
 
         def _body(self, allowed: set[str] | None = None) -> dict:
@@ -211,12 +225,66 @@ def make_server(registry: Registry, host: str = "127.0.0.1", port: int = 8077, c
                 raise HTTPError(429, "rate limit: slow down", {"Retry-After": "60"})
             return who
 
-        def _cookie(self) -> str:
+        def _cookie(self, name: str | None = None) -> str:
             for part in self.headers.get("Cookie", "").split(";"):
-                name, _, value = part.strip().partition("=")
-                if name == cookie_name:
+                key, _, value = part.strip().partition("=")
+                if key == (name or cookie_name):
                     return value
             return ""
+
+        def _origin(self) -> str:
+            return cfg.public_origin or f"{self._scheme()}://{self.headers.get('Host', '')}"
+
+        def _redirect(self, location: str, cookies: list[str] | None = None):
+            self.send_response(302)
+            self.send_header("Location", location)
+            self.send_header("Content-Length", "0")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("X-Frame-Options", "DENY")
+            if self._scheme() == "https":
+                self.send_header("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+            for c in cookies or []:
+                self.send_header("Set-Cookie", c)
+            self.end_headers()
+
+        def _sso(self, path: str, qp):
+            redirect_uri = self._origin() + "/auth/sso/callback"
+            secure = "; Secure" if cfg.secure_cookies else ""
+            clear = f"{binding_cookie}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0{secure}"
+            if path == "/auth/sso/start":
+                org = qp("org")
+                loaded = sso_config(org)
+                if not loaded:
+                    return self._redirect("/?sso_error=" + urllib.parse.quote(SSOError("not_configured").message))
+                state, nonce, verifier, binding = new_flow()
+                try:
+                    url = oidc.authorize_url(loaded[0], redirect_uri, state, nonce, verifier)
+                except SSOError as exc:
+                    return self._redirect("/?sso_error=" + urllib.parse.quote(exc.message))
+                accounts.sso_begin(org, state, nonce, verifier, binding)
+                # Lax, not Strict: it must come back on the provider's cross-site redirect to the callback.
+                return self._redirect(url, [f"{binding_cookie}={binding}; Path=/; HttpOnly; SameSite=Lax; Max-Age=600{secure}"])
+            try:
+                if qp("error") or not qp("code"):
+                    raise SSOError("provider", qp("error")[:40])
+                try:
+                    org, nonce, verifier = accounts.sso_take(qp("state"), self._cookie(binding_cookie))
+                except AuthError as exc:
+                    raise SSOError("expired") from exc
+                loaded = sso_config(org)
+                if not loaded:
+                    raise SSOError("not_configured")
+                email = oidc.finish(loaded[0], loaded[1], redirect_uri, qp("code", ""), verifier, nonce)
+                user = accounts.user(email)
+                if user is None or user.org_id != org:
+                    raise SSOError("no_account", email)
+                token, user = accounts.sso_session(email)
+                registry.gateway(org).org.ledger.append("account", "-", {"by": email, "event": "signed in with SSO"})
+            except SSOError as exc:
+                return self._redirect("/?sso_error=" + urllib.parse.quote(exc.message), [clear])
+            session = f"{cookie_name}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={12 * 3600}{secure}"
+            return self._redirect("/#approvals", [session, clear])
 
         def _same_site(self):
             if self.headers.get("X-Requested-With") != "fetch":
@@ -227,10 +295,12 @@ def make_server(registry: Registry, host: str = "127.0.0.1", port: int = 8077, c
                 if origin not in (f"{self._scheme()}://{host}", cfg.public_origin):
                     raise HTTPError(403, "cross-site request refused")
 
-        def _user(self, *roles: str):
+        def _user(self, *roles: str, allow_limited: bool = False):
             user = accounts.session(self._cookie())
             if user is None:
                 raise HTTPError(401, "Sign in to continue.")
+            if user.limited and not allow_limited:
+                raise HTTPError(403, "Set up two-step sign-in to continue.")
             if roles and user.role not in roles:
                 raise HTTPError(403, "Your role can't do that.")
             if not limiter.allow("session:" + user.email):
@@ -269,6 +339,8 @@ def make_server(registry: Registry, host: str = "127.0.0.1", port: int = 8077, c
 
             if path.startswith("/api/web/"):
                 return self._web(m, path[len("/api/web/"):], qp)
+            if m == "GET" and path in ("/auth/sso/start", "/auth/sso/callback"):
+                return self._sso(path, lambda name, default="": (query.get(name) or [default])[0][:4096])
             if path.startswith("/v1/"):
                 return self._api(m, path, qp)
             raise HTTPError(404, "not found")
@@ -327,19 +399,64 @@ def make_server(registry: Registry, host: str = "127.0.0.1", port: int = 8077, c
                     raise HTTPError(401, "Email or password is incorrect.")
                 if not isinstance(b.get("email"), str) or not isinstance(b.get("password"), str):
                     raise HTTPError(422, "Enter your email and password.")
-                token, user = accounts.login(b["email"], b["password"], self._ip())
-                gw = registry.gateway(user.org_id)
-                return self._json(200, {"email": user.email, "role": user.role, "company": gw.org.name},
-                                  self._set_cookie(token, 12 * 3600))
+                result = accounts.login(b["email"], b["password"], self._ip(),
+                                        require_two_step=lambda org: registry.gateway(org).org.policy.require_two_step)
+                if result.kind == "two_step":
+                    return self._json(200, {"two_step_required": True, "pending": result.token})
+                return self._json(200, {"signed_in": True}, self._set_cookie(result.token, 12 * 3600))
+            if route == "login/two-step" and m == "POST":
+                b = self._body({"pending", "code"})
+                if not isinstance(b.get("pending"), str) or not isinstance(b.get("code"), str) or len(b["code"]) > 20:
+                    raise HTTPError(422, "Enter the code from your authenticator app.")
+                result = accounts.login_second_step(b["pending"], b["code"], self._ip())
+                return self._json(200, {"signed_in": True}, self._set_cookie(result.token, 12 * 3600))
+            if route == "sso" and m == "GET":
+                loaded = sso_config(qp("org"))
+                return self._json(200, {"enabled": bool(loaded), "label": loaded[0].label if loaded else ""})
             if route == "logout" and m == "POST":
                 accounts.logout(self._cookie())
                 return self._json(200, {"signed_out": True}, self._set_cookie("", 0))
 
-            user = self._user()
+            user = self._user(allow_limited=route in ("me", "two-step/start", "two-step/confirm", "password"))
             gw = registry.gateway(user.org_id)
             if route == "me" and m == "GET":
                 return self._json(200, {"email": user.email, "role": user.role, "company": gw.org.name,
-                                        "mode": gw.org.policy.mode})
+                                        "mode": gw.org.policy.mode, "two_step": user.two_step,
+                                        "setup_required": user.limited,
+                                        "require_two_step": gw.org.policy.require_two_step,
+                                        "recovery_codes_left": accounts.recovery_codes_left(user.email)})
+            if route == "two-step/start" and m == "POST":
+                self._body(set())
+                if user.two_step:
+                    raise HTTPError(409, "Two-step sign-in is already on. Turn it off first to move it to a new phone.")
+                secret = accounts.start_two_step(user.email)
+                uri = totp.otpauth_uri(secret, user.email)
+                image = base64.b64encode(qr.svg(uri).encode()).decode()
+                return self._json(200, {"key": " ".join(secret[i:i + 4] for i in range(0, len(secret), 4)),
+                                        "uri": uri, "qr": "data:image/svg+xml;base64," + image})
+            if route == "two-step/confirm" and m == "POST":
+                b = self._body({"code"})
+                if not isinstance(b.get("code"), str) or len(b["code"]) > 20:
+                    raise HTTPError(422, "Enter the 6-digit code from your authenticator app.")
+                codes = accounts.confirm_two_step(user.email, b["code"])
+                gw.org.ledger.append("account", "-", {"by": user.email, "event": "two-step sign-in turned on"})
+                return self._json(200, {"recovery_codes": codes})
+            if route == "two-step/disable" and m == "POST":
+                b = self._body({"password", "code"})
+                if gw.org.policy.require_two_step:
+                    raise HTTPError(403, "Your company requires two-step sign-in, so it can't be turned off.")
+                if not isinstance(b.get("password"), str) or not isinstance(b.get("code"), str):
+                    raise HTTPError(422, "Enter your password and a code.")
+                accounts.disable_two_step(user.email, b["password"], b["code"])
+                gw.org.ledger.append("account", "-", {"by": user.email, "event": "two-step sign-in turned off"})
+                return self._json(200, {"two_step": False}, self._set_cookie("", 0))
+            if route == "password" and m == "POST":
+                b = self._body({"current", "new"})
+                if not isinstance(b.get("current"), str) or not isinstance(b.get("new"), str):
+                    raise HTTPError(422, "Enter your current and new password.")
+                accounts.change_password(user.email, b["current"], b["new"])
+                gw.org.ledger.append("account", "-", {"by": user.email, "event": "password changed"})
+                return self._json(200, {"changed": True}, self._set_cookie("", 0))
             if route == "overview" and m == "GET":
                 return self._json(200, views.overview(gw))
             if route == "tickets" and m == "GET":
@@ -362,7 +479,8 @@ def make_server(registry: Registry, host: str = "127.0.0.1", port: int = 8077, c
             if route == "settings" and m == "POST":
                 self._user("admin")
                 return self._json(200, self._save_settings(gw, user, self._body(
-                    {"mode", "approval_limit", "dual_approval_limit", "recent_bank_change_days", "ticket_hours"})))
+                    {"mode", "approval_limit", "dual_approval_limit", "recent_bank_change_days", "ticket_hours",
+                     "require_two_step"})))
             if route in ("import/vendors", "import/pos") and m == "POST":
                 self._user("admin")
                 if not self.headers.get("Content-Type", "").startswith("text/csv"):
@@ -397,6 +515,12 @@ def make_server(registry: Registry, host: str = "127.0.0.1", port: int = 8077, c
                         changes[attr] = parse_amount(str(b[field]))
                     except ValueError as exc:
                         raise HTTPError(422, f"{field}: {exc}") from exc
+            if "require_two_step" in b:
+                if not isinstance(b["require_two_step"], bool):
+                    raise HTTPError(422, "require_two_step must be true or false")
+                if b["require_two_step"] and not user.two_step:
+                    raise HTTPError(422, "Turn on two-step sign-in for your own account first, so you aren't locked out.")
+                changes["require_two_step"] = b["require_two_step"]
             for field, lo, hi in (("recent_bank_change_days", 1, 365), ("ticket_hours", 1, 720)):
                 if field in b:
                     v = b[field]
@@ -412,6 +536,7 @@ def make_server(registry: Registry, host: str = "127.0.0.1", port: int = 8077, c
             return views.settings(gw, accounts.users(user.org_id))
 
         def _handle(self):
+            self._consumed = False
             try:
                 self._route()
             except HTTPError as exc:
@@ -420,6 +545,21 @@ def make_server(registry: Registry, host: str = "127.0.0.1", port: int = 8077, c
                 self._json(exc.status, {"error": str(exc)})
             except Exception:  # never leak internals
                 self._json(500, {"error": "Something went wrong on the server. Nothing was changed."})
+            finally:
+                self._drain()
+
+        def _drain(self):
+            """A body the route didn't read must not be mistaken for the next request on this connection."""
+            if self._consumed:
+                return
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                length = -1
+            if 0 < length <= MAX_CSV:
+                self.rfile.read(length)
+            elif length:
+                self.close_connection = True
 
         def do_GET(self):
             self._handle()

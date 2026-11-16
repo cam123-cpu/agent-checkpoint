@@ -213,21 +213,21 @@ def test_session_cookie_hardening(world):
 
 
 def test_idle_sessions_expire(tmp_path):
-    acc = Accounts(str(tmp_path / "w.db"))
+    acc = Accounts(str(tmp_path / "w.db"), os.urandom(32))
     acc.create_user("a@x.com", "acme", "admin", PW)
-    token, _ = acc.login("a@x.com", PW, "1.1.1.1")
+    token = acc.login("a@x.com", PW, "1.1.1.1").token
     old = (dt.datetime.now(dt.UTC) - dt.timedelta(minutes=31)).isoformat()
     acc.db.execute("UPDATE sessions SET last_seen = ?", (old,))
     assert acc.session(token) is None
 
 
 def test_password_change_and_disable_end_sessions(tmp_path):
-    acc = Accounts(str(tmp_path / "w.db"))
+    acc = Accounts(str(tmp_path / "w.db"), os.urandom(32))
     acc.create_user("a@x.com", "acme", "admin", PW)
-    t1, _ = acc.login("a@x.com", PW, "ip")
+    t1 = acc.login("a@x.com", PW, "ip").token
     acc.set_password("a@x.com", "another-long-pass-42")
     assert acc.session(t1) is None
-    t2, _ = acc.login("a@x.com", "another-long-pass-42", "ip")
+    t2 = acc.login("a@x.com", "another-long-pass-42", "ip").token
     acc.set_disabled("a@x.com", True)
     assert acc.session(t2) is None
     with pytest.raises(AuthError):
@@ -238,7 +238,7 @@ def test_password_change_and_disable_end_sessions(tmp_path):
 def test_password_hashing_and_policy(tmp_path, world):
     h = hash_password(PW)
     assert h.startswith("scrypt$16384$8$1$") and PW not in h and hash_password(PW) != h  # salted
-    acc = Accounts(str(tmp_path / "w.db"))
+    acc = Accounts(str(tmp_path / "w.db"), os.urandom(32))
     for weak in ("short", "password123", "aaaaaaaaaaaaaa", "jonathan-1234567"):
         with pytest.raises(AuthError):
             acc.create_user("jonathan@x.com", "acme", "admin", weak)
@@ -298,7 +298,7 @@ def test_sql_injection_is_inert(app):
 def test_sql_is_never_built_from_input():
     """Every f-string SQL in the code interpolates only module constants or fixed clauses."""
     src = os.path.join(os.path.dirname(__file__), "..", "src", "agent_checkpoint")
-    allowed = {"{_PAY_COLS}"}
+    allowed = {"{_PAY_COLS}", "{table}", "{column}", "{ddl}"}  # the last three: the fixed ADDED list in accounts.py
     for f in os.listdir(src):
         if not f.endswith(".py"):
             continue
@@ -445,3 +445,18 @@ def test_approve_through_web_writes_audit_trail(app):
     entries = reg.gateway("acme").org.ledger.entries("human_decision")
     assert entries[-1]["body"]["approver"] == "approver@acme.com" and entries[-1]["body"]["note"] == "Called them."
     assert "GB33BUKB20201555555555" not in json.dumps(reg.gateway("acme").org.ledger.entries())
+
+
+def test_unread_bodies_never_leak_into_the_next_request(app):
+    """Keep-alive: a body a route ignores (sign-out) must not be parsed as the next request."""
+    _, client = app
+    c = client()
+    c.login("admin@acme.com")
+    conn = http.client.HTTPConnection("127.0.0.1", c.port, timeout=10)
+    h = {"X-Requested-With": "fetch", "Content-Type": "application/json", "Cookie": c.cookie}
+    conn.request("POST", "/api/web/logout", body=b'{"ignored": true}', headers=h)
+    assert conn.getresponse().read() is not None
+    conn.request("POST", "/api/web/login", body=json.dumps({"email": "admin@acme.com", "password": PW}).encode(),
+                 headers={"X-Requested-With": "fetch", "Content-Type": "application/json"})
+    assert conn.getresponse().status == 200
+    conn.close()

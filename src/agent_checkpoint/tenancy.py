@@ -2,7 +2,8 @@
 
     <home>/
       keys.json                 sha256(key) → {org, kind: agent|approver, name}. Keys are never stored.
-      web.db                    people who sign in to the web app, their sessions and sign-in limits
+      web.db, web.key           people who sign in to the web app (two-step secrets encrypted with web.key),
+                                their sessions and sign-in limits
       network/intel.db, intel.key   the shared fraud network
       orgs/<org_id>/
         policy.json             the company's rules (edit this)
@@ -135,7 +136,11 @@ class Registry:
     def accounts(self) -> Accounts:
         if self._accounts is None:
             self.init()
-            self._accounts = Accounts(os.path.join(self.home, "web.db"))
+            kp = os.path.join(self.home, "web.key")
+            if not os.path.exists(kp):
+                _write_secret(kp, secrets.token_bytes(32))
+            with open(kp, "rb") as f:
+                self._accounts = Accounts(os.path.join(self.home, "web.db"), f.read())
         return self._accounts
 
     def add_user(self, org_id: str, email: str, role: str, password: str) -> User:

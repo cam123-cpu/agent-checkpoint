@@ -46,6 +46,7 @@ class Policy:
     agents: dict[str, AgentScope] = field(default_factory=dict)
     approvers: tuple[str, ...] = ()
     internal_domains: tuple[str, ...] = ()       # your own mail domains (forwarded invoices)
+    require_two_step: bool = False               # everyone signing in with a password needs an authenticator code
 
     def __post_init__(self):
         if self.mode not in ("shadow", "enforce"):

@@ -216,11 +216,23 @@ table.data .why td { background: var(--paper); color: var(--ink); }
 .demo-banner { background: var(--pause-tint); color: var(--ink); font-size: var(--t-small); }
 .demo-banner p { max-width: 1040px; margin: 0 auto; padding: var(--s2) var(--s4); }
 
+/* ---- two-step set-up ---- */
+.steps { padding-left: var(--s5); display: grid; gap: var(--s5); margin-bottom: var(--s4); }
+.steps li > * + * { margin-top: var(--s2); }
+.qr { display: block; background: #ffffff; padding: var(--s2); border: 1px solid var(--rule); border-radius: 4px; }
+.key { font-family: var(--code); font-size: var(--t-lead); letter-spacing: 0.05em; overflow-wrap: anywhere; }
+.codes { list-style: none; padding: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--s2) var(--s5); }
+.codes li { font-size: var(--t-body); }
+a.who-name { color: var(--muted); }
+a.who-name:hover { color: var(--ink); }
+
 /* ---- sign in ---- */
 .signin { max-width: 400px; margin: var(--s7) auto; padding: 0 var(--s4); }
 .signin .panel { margin-top: var(--s5); }
 .signin form > * + * { margin-top: var(--s4); }
 .signin button[type="submit"] { width: 100%; }
+.signin .panel > div > button { width: 100%; }
+.divider { margin: var(--s4) 0; text-align: center; }
 
 @media (max-width: 640px) {
   .slip-body, .stub { padding-left: var(--s4); padding-right: var(--s4); }

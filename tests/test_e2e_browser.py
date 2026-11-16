@@ -116,3 +116,33 @@ def test_phone_layout_and_pages(site, browser):
     assert problems == []
     page.get_by_role("button", name="Sign out").click()
     page.wait_for_selector("text=You are signed out.")
+
+
+def test_two_step_setup_and_sign_in_in_the_browser(site, browser):
+    import time
+
+    from agent_checkpoint import totp
+    base, reg = site
+    reg.add_user("acme", "twostep@acme.com", "approver", PW)
+    page, problems = sign_in(browser, base, "twostep@acme.com")
+    page.goto(base + "/#account")
+    page.get_by_role("button", name="Set up two-step sign-in").click()
+    page.wait_for_selector("img.qr")
+    assert page.locator("img.qr").evaluate("img => img.naturalWidth > 100")  # the QR image rendered under the CSP
+    key = page.locator(".key").text_content().replace(" ", "")
+    page.fill("#setup-code", totp.code_at(key, int(time.time() // 30)))
+    page.get_by_role("button", name="Turn on two-step sign-in").click()
+    page.wait_for_selector(".codes li")
+    assert page.locator(".codes li").count() == 10
+    page.get_by_role("button", name="I've saved my recovery codes").click()
+    page.wait_for_selector("text=On. 10 recovery codes left.")
+    page.get_by_role("button", name="Sign out").click()
+    page.wait_for_selector("text=You are signed out.")
+    page.fill("#email", "twostep@acme.com")
+    page.fill("#password", PW)
+    page.click("button[type=submit]")
+    page.wait_for_selector("#code")  # (this step found a keep-alive bug: sign-out left its body on the connection)
+    page.fill("#code", totp.code_at(key, int(time.time() // 30) + 1))
+    page.get_by_role("button", name="Continue").click()
+    page.wait_for_selector(".slip")
+    assert problems == []
