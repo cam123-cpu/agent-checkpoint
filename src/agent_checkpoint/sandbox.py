@@ -16,7 +16,7 @@ from .store import Store
 
 def make_org(org_id: str = "acme", name: str = "Acme Manufacturing", policy: Policy | None = None,
              intel: Intel | None = None, clock=utcnow) -> Gateway:
-    store = Store(":memory:")
+    store = Store(":memory:", secrets.token_bytes(32))
     signer = Signer.generate(org_id)
     org = Org(org_id, name, store, Ledger(":memory:", secrets.token_bytes(32)), policy or Policy(), signer,
               SandboxRail(store, Verifier(signer.public_pem())), CollectingNotifier(), intel)

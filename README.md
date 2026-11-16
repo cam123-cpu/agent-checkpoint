@@ -68,6 +68,30 @@ agent-checkpoint approve demo T-... --as controller@demo.example            # ad
 agent-checkpoint reject  demo T-... --as controller@demo.example --fraud    # reports it to the shared network
 ```
 
+## The web app
+
+`agent-checkpoint serve` also serves a private web app for the people who approve. It works on
+a phone (add it to the home screen) and on a desktop:
+
+- **Approvals.** Each paused request as a hold slip: the amount, why it was paused, the account
+  on file against the one on the invoice, the evidence, and Approve / Reject / Report as fraud.
+  Bank changes can't be approved until you tick that you phoned the number on file.
+- **Overview.** What was checked, sent to a person and stopped, with amounts.
+- **Activity.** Every agent action, filterable, with the reasons, and CSV export for auditors.
+- **Audit log.** The integrity check and the fingerprint to hand to your auditor.
+- **Vendors** and **Settings** (limits, mode, agents, people, CSV import for admins).
+
+```bash
+agent-checkpoint add-user acme cfo@acme.com --role admin           # prints a password once
+agent-checkpoint serve --tls-cert cert.pem --tls-key key.pem       # or --force-https behind deploy/Caddyfile
+agent-checkpoint serve --dev                                       # localhost only, for trying it
+```
+
+A clickable demo with sample data builds with `python scripts/build_demo.py --out dist/demo`.
+The web app meets a 20-point pre-launch security checklist (see [SECURITY.md](SECURITY.md)), and
+its design rules (no gradients, glass, emoji, icon kits, em dashes, opacity hovers, low contrast)
+are enforced by `tests/test_web_rules.py`.
+
 ## Results on the simulated quarter
 
 Three months at a synthetic company with eight suppliers and three agents from different
@@ -172,6 +196,7 @@ for the design.
 
 ```bash
 pip install -e ".[dev]"
-pytest -q          # 77 tests: checks, approvals, receipts, ledger tampering, network, MCP (incl. a real stdio process), HTTP, CLI, quality bar
-ruff check src tests
+pytest -q          # 135 tests: checks, approvals, receipts, ledger tampering, network, MCP (incl. a real stdio process),
+                   # HTTP, CLI, quality bar, the security checklist, design rules, and a real browser (if Playwright is installed)
+ruff check src tests scripts
 ```

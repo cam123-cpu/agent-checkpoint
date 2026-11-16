@@ -251,9 +251,10 @@ def check_amount_outlier(req, ctx):
     mad = max(statistics.median(abs(x - med) for x in logs), 0.08)
     z = 0.6745 * (math.log(req.amount_cents) - med) / mad
     if z > ctx.policy.outlier_z:
-        typical = money(round(math.exp(med)))
-        return [Finding("amount_outlier", P, f"{money(req.amount_cents)} is far above this vendor's usual "
-                                             f"{typical} (robust z = {z:.1f})", 0.75 if z > 8 else 0.55)]
+        typical = round(math.exp(med))
+        return [Finding("amount_outlier", P, f"{money(req.amount_cents)} is {req.amount_cents / typical:.1f} times this "
+                                             f"vendor's usual {money(typical)}, well outside its normal range",
+                        0.75 if z > 8 else 0.55)]
     return []
 
 

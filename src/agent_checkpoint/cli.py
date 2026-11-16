@@ -3,10 +3,12 @@
     agent-checkpoint demo                         one-command sandbox company with keys, for trying the MCP tools
     agent-checkpoint create-org acme --name "Acme Manufacturing"
     agent-checkpoint add-agent acme ap-agent --actions pay,change_bank --max 100000 --daily 150000
-    agent-checkpoint add-approver acme controller@acme.com
+    agent-checkpoint add-approver acme controller@acme.com           (API key for an approver tool)
+    agent-checkpoint add-user acme cfo@acme.com --role admin         (web sign-in; prints a password once)
     agent-checkpoint import-vendors acme vendors.csv      /  import-pos acme pos.csv
     agent-checkpoint set-mode acme enforce
-    agent-checkpoint serve --port 8077
+    agent-checkpoint serve --port 8077 --tls-cert cert.pem --tls-key key.pem   (or behind a proxy: --force-https)
+    agent-checkpoint serve --dev                  (plain HTTP on localhost for development only)
     agent-checkpoint mcp                          (reads CHECKPOINT_AGENT_KEY; --url for a remote checkpoint)
     agent-checkpoint tickets acme | approve acme T-... --as cfo@acme.com [--callback-verified] | reject ...
     agent-checkpoint report acme [--since 2026-10-01] | verify acme | head acme | public-key acme
@@ -20,10 +22,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import secrets
 import sys
 from dataclasses import replace
 from datetime import date
 
+from .accounts import AuthError
 from .gateway import CheckpointError
 from .importers import import_pos, import_vendors
 from .models import parse_amount
@@ -48,6 +52,8 @@ def cmd_demo(args) -> int:
     agent_key = reg.add_agent("demo", "claude-ap", AgentScope(("pay", "change_bank", "refund"), 100_000_00,
                                                               150_000_00, "Claude"))
     approver_key = reg.add_approver("demo", "controller@demo.example")
+    web_password = secrets.token_urlsafe(15)
+    reg.add_user("demo", "controller@demo.example", "admin", web_password)
     store = reg.gateway("demo").org.store
     for vid, name, acct, domain in (("V-NORTH", "Northwind Supplies", "US00021000001234", "northwind-supplies.com"),
                                     ("V-CONTO", "Contoso Packaging", "US00021000005678", "contoso.com"),
@@ -58,6 +64,8 @@ def cmd_demo(args) -> int:
     store.upsert_po(PurchaseOrder("PO-1003", "V-CONTO", 4_800_00))
     print(json.dumps({"home": reg.home, "org": "demo", "mode": "enforce",
                       "agent_key": agent_key, "approver_key": approver_key,
+                      "web_sign_in": {"email": "controller@demo.example", "password": web_password,
+                                      "start": f"agent-checkpoint --home {reg.home} serve --dev"},
                       "try": ["pay V-CONTO invoice INV-77 for 4800.00 on PO-1001 (goes through)",
                               "pay V-CONTO invoice INV-78 for 48000.00 on PO-1003 (blocked: decimal slip)",
                               "pay V-CONTO invoice INV-77 again (blocked: duplicate)",
@@ -91,6 +99,31 @@ def cmd_add_approver(args) -> int:
     return 0
 
 
+def cmd_add_user(args) -> int:
+    password = sys.stdin.readline().rstrip("\n") if args.password_stdin else secrets.token_urlsafe(15)
+    _registry(args).add_user(args.org, args.email, args.role, password)
+    if not args.password_stdin:
+        print(password)
+        print(f"password for {args.email} (shown once; they can't change it in the app yet, so send it securely)",
+              file=sys.stderr)
+    return 0
+
+
+def cmd_user_state(args, disabled: bool) -> int:
+    _registry(args).accounts().set_disabled(args.email, disabled)
+    print(f"{args.email} {'disabled; their sessions are ended' if disabled else 'enabled'}")
+    return 0
+
+
+def cmd_set_password(args) -> int:
+    password = sys.stdin.readline().rstrip("\n") if args.password_stdin else secrets.token_urlsafe(15)
+    _registry(args).accounts().set_password(args.email, password)
+    if not args.password_stdin:
+        print(password)
+    print("password changed; existing sessions are ended", file=sys.stderr)
+    return 0
+
+
 def cmd_set_mode(args) -> int:
     reg = _registry(args)
     reg.save_policy(args.org, replace(reg.policy(args.org), mode=args.mode))
@@ -109,9 +142,19 @@ def cmd_import(args, which) -> int:
 
 
 def cmd_serve(args) -> int:
-    from .server import make_server
-    srv = make_server(_registry(args), args.host, args.port)
-    print(f"agent-checkpoint listening on http://{args.host}:{args.port}", file=sys.stderr)
+    from .server import ServerConfig, make_server
+    tls = (args.tls_cert, args.tls_key) if args.tls_cert else None
+    if args.tls_cert and not args.tls_key:
+        raise ValueError("--tls-cert needs --tls-key")
+    if not (tls or args.force_https or args.dev):
+        raise ValueError("choose --tls-cert/--tls-key, --force-https (behind a TLS proxy), or --dev (localhost only)")
+    if args.dev and args.host not in ("127.0.0.1", "localhost", "::1"):
+        raise ValueError("--dev serves plain HTTP and is only allowed on localhost")
+    cfg = ServerConfig(secure_cookies=not args.dev, force_https=args.force_https,
+                       trusted_proxies=tuple(args.trusted_proxy or ("127.0.0.1", "::1")), public_origin=args.public_origin or "")
+    srv = make_server(_registry(args), args.host, args.port, cfg, tls)
+    scheme = "https" if tls else "http"
+    print(f"agent-checkpoint listening on {scheme}://{args.host}:{args.port}", file=sys.stderr)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
@@ -171,12 +214,26 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--max", help="per-action limit, e.g. 100000"); s.add_argument("--daily", help="daily cap")
     s.add_argument("--vendor", help="who makes the agent"); s.set_defaults(fn=cmd_add_agent)
     s = sub.add_parser("add-approver"); s.add_argument("org"); s.add_argument("email"); s.set_defaults(fn=cmd_add_approver)
+    s = sub.add_parser("add-user", help="someone who signs in to the web app")
+    s.add_argument("org"); s.add_argument("email")
+    s.add_argument("--role", choices=["admin", "approver", "auditor"], required=True)
+    s.add_argument("--password-stdin", action="store_true", help="read the password from stdin instead of generating one")
+    s.set_defaults(fn=cmd_add_user)
+    s = sub.add_parser("set-password"); s.add_argument("email"); s.add_argument("--password-stdin", action="store_true")
+    s.set_defaults(fn=cmd_set_password)
+    for name, dis in (("disable-user", True), ("enable-user", False)):
+        s = sub.add_parser(name); s.add_argument("email"); s.set_defaults(fn=lambda a, d=dis: cmd_user_state(a, d))
     s = sub.add_parser("set-mode"); s.add_argument("org"); s.add_argument("mode", choices=["shadow", "enforce"])
     s.set_defaults(fn=cmd_set_mode)
     for which in ("vendors", "pos"):
         s = sub.add_parser(f"import-{which}"); s.add_argument("org"); s.add_argument("file")
         s.set_defaults(fn=lambda a, w=which: cmd_import(a, w))
     s = sub.add_parser("serve"); s.add_argument("--host", default="127.0.0.1"); s.add_argument("--port", type=int, default=8077)
+    s.add_argument("--tls-cert"); s.add_argument("--tls-key")
+    s.add_argument("--force-https", action="store_true", help="behind a TLS proxy: redirect http and send HSTS")
+    s.add_argument("--trusted-proxy", action="append", help="address whose X-Forwarded-* headers are believed")
+    s.add_argument("--public-origin", help="e.g. https://checkpoint.acme.com")
+    s.add_argument("--dev", action="store_true", help="plain HTTP on localhost, cookies without Secure")
     s.set_defaults(fn=cmd_serve)
     s = sub.add_parser("mcp", help="MCP server over stdio for an agent")
     s.add_argument("--url", help="remote checkpoint URL (otherwise uses the local home folder)")
@@ -208,6 +265,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return args.fn(args)
     except CheckpointError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    except AuthError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     except (ValueError, KeyError, FileExistsError, FileNotFoundError) as exc:
