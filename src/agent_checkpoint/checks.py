@@ -142,15 +142,40 @@ def check_currency(req, ctx):
 
 def check_vendor_known(req, ctx):
     if ctx.store.vendor(req.vendor_id) is None:
-        return [Finding("unknown_vendor", B, f"Vendor {req.vendor_id} is not in the vendor master", 0.9)]
+        return [Finding("unknown_vendor", B, f"Vendor {req.vendor_id} is not on the vendor list", 0.9)]
     return []
+
+
+def _accounts_in_play(req, ctx) -> list[str]:
+    """Every account this action could send money to, including the one on file.
+
+    A payment names no account of its own: the payee is the vendor's account. That account has to be
+    checked against the fraud list too, or a reported account already on file is paid without a look.
+    """
+    seen: list[str] = []
+
+    def add(acct: str) -> None:
+        if acct and norm_account(acct) and all(norm_account(a) != norm_account(acct) for a in seen):
+            seen.append(acct)
+
+    add(req.bank_account)
+    add(req.bank_account_on_invoice)
+    vendor = ctx.store.vendor(req.vendor_id)
+    if req.action == "pay" and vendor is not None:
+        add(vendor.bank_account)
+    if req.action == "refund":
+        key = norm_invoice(req.invoice_number)
+        for payment in ctx.store.payments(req.vendor_id, "pay"):
+            if payment.invoice_key == key:
+                add(payment.bank_account)
+    return seen
 
 
 def check_fraud_network(req, ctx):
     if ctx.intel is None:
         return []
     out = []
-    for acct in {req.bank_account, req.bank_account_on_invoice} - {""}:
+    for acct in _accounts_in_play(req, ctx):
         n = ctx.intel.account_reports(acct)
         if n:
             out.append(Finding("known_fraud", B, f"Account {last4(acct)} was reported as fraud by {n} "
@@ -190,7 +215,7 @@ def check_sender(req, ctx):
     known = set(v.email_domains)
     out: list[Finding] = []
     for d in _senders(req):
-        if d in known or d in ctx.policy.internal_domains:
+        if _domain_known(d, known) or _domain_known(d, set(ctx.policy.internal_domains)):
             continue
         lookalike = _lookalike(d, known)
         if lookalike:
@@ -200,11 +225,54 @@ def check_sender(req, ctx):
     return out
 
 
+# Letters that render as ASCII in a domain name. Digits are left alone.
+_CONFUSABLES = str.maketrans({
+    "а": "a", "ϲ": "c", "е": "e", "ɡ": "g", "һ": "h", "і": "i", "ј": "j", "ӏ": "l", "о": "o",
+    "р": "p", "ѕ": "s", "у": "y", "х": "x", "α": "a", "ε": "e", "ι": "i", "κ": "k", "ν": "v",
+    "ο": "o", "ρ": "p", "τ": "t", "υ": "u", "χ": "x",
+})
+
+
+def _forms(domain: str) -> set[str]:
+    """The domain as written, plus its Unicode form when it is punycode (xn--)."""
+    domain = (domain or "").strip(".").lower()
+    if not domain:
+        return set()
+    forms = {domain}
+    try:
+        forms.add(domain.encode("ascii").decode("idna").strip(".").lower())
+    except UnicodeError:
+        pass
+    return {form for form in forms if form}
+
+
+def _domain_known(domain: str, known: set[str]) -> bool:
+    """True when `domain` is one of `known`, including the same name in punycode and Unicode."""
+    forms = _forms(domain)
+    if not forms:
+        return False
+    return any(forms & _forms(k) for k in known)
+
+
+def _skeleton(domain: str) -> str:
+    """Punycode decoded, then look-alike letters folded, so a Cyrillic 'apple' matches 'apple'."""
+    forms = _forms(domain)
+    chosen = next((form for form in forms if any(ord(ch) > 127 for ch in form)), domain.strip(".").lower())
+    return chosen.translate(_CONFUSABLES)
+
+
 def _lookalike(domain: str, known: set[str]) -> str | None:
-    """Close spelling, a known domain hidden in a longer one (vendor.com.evil.example), or punycode."""
+    """Close spelling, or a known domain hidden in a longer one (vendor.com.evil.example).
+
+    Internationalized names are compared after decoding. A punycode name is a look-alike only when
+    the decoded name is close to a real domain, not merely because it starts with xn--.
+    """
+    sk = _skeleton(domain)
     for k in known:
-        if SequenceMatcher(None, domain, k).ratio() >= 0.8 or domain.startswith(k + ".") or (
-                domain.startswith("xn--") or ".xn--" in domain):
+        ks = _skeleton(k)
+        close = (sk and ks and (SequenceMatcher(None, sk, ks).ratio() >= 0.8 or sk.startswith(ks + "."))
+                 or SequenceMatcher(None, domain, k).ratio() >= 0.8 or domain.startswith(k + "."))
+        if close and not _domain_known(domain, {k}):
             return k
     return None
 
@@ -317,13 +385,19 @@ def check_amount_outlier(req, ctx):
 
 def check_new_vendor(req, ctx):
     v = ctx.store.vendor(req.vendor_id)
-    if req.action != "pay" or v is None or (req.on - v.created_on).days > ctx.policy.new_vendor_days:
+    if req.action != "pay" or v is None:
         return []
+    age = (req.on - v.created_on).days
+    if age > ctx.policy.new_vendor_days:
+        return []
+    when = "today" if age <= 0 else f"{age} day{'s' if age != 1 else ''} ago"
+    out = [Finding("new_vendor", P, f"{v.name} was added {when}. Payments to a vendor this new "
+                                    "need a person to approve them.", 0.45)]
     amounts = ctx.store.all_pay_amounts()
     if len(amounts) >= 10 and req.amount_cents > ctx.policy.new_vendor_multiple * statistics.median(amounts):
-        return [Finding("new_vendor_large", P, f"{v.name} was added {(req.on - v.created_on).days} days ago and "
-                                               f"this is over {ctx.policy.new_vendor_multiple:g}x a typical payment", 0.4)]
-    return []
+        out.append(Finding("new_vendor_large", P, f"{v.name} was added {when} and this is over "
+                                                  f"{ctx.policy.new_vendor_multiple:g}x a typical payment", 0.4))
+    return out
 
 
 def _norm_name(name: str) -> str:
@@ -363,7 +437,7 @@ def check_bank_change(req, ctx):
                                                 f"vendor, {shared.name}", 0.9))
     known = set(v.email_domains)
     for d in _senders(req):
-        if d in known or d in ctx.policy.internal_domains:
+        if _domain_known(d, known) or _domain_known(d, set(ctx.policy.internal_domains)):
             continue
         lookalike = _lookalike(d, known)
         if lookalike:

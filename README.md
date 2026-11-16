@@ -15,7 +15,7 @@ tools. None of them lets the agent choose where money goes.
 ```
   Agents from any vendor              Agent Checkpoint                         Company systems
  ┌──────────────────────┐   MCP   ┌───────────────────────────────┐  receipt  ┌──────────────────┐
- │ AP agent (Claude)    │────────▶│ 19 checks (< 2 ms)             │─────────▶│ Payment rail     │
+ │ AP agent (Claude)    │────────▶│ 20 checks (< 2 ms)             │─────────▶│ Payment rail     │
  │ CRM refund agent     │  HTTP   │ go / pause / block             │          │ (bank, ERP pay)  │
  │ Ops agent            │────────▶│ approvals: phone, 2-person     │          └──────────────────┘
  └──────────────────────┘         │ signed receipts (Ed25519)      │  read    ┌──────────────────┐
@@ -135,9 +135,10 @@ history was too noisy that quarter. **Read all of these numbers as an upper boun
 person wrote the incidents and the checks. The real test is shadow mode on a company's own
 traffic.
 
-Then a second company joins the network. Two weeks later the same fraudster tries the same bank
-account there from a *new* look-alike domain, and it is blocked because the first company marked
-it as fraud.
+Then a second company on the same installation shares that list. Two weeks later the same fraudster
+tries the same bank account there from a *new* look-alike domain, and it is blocked because the
+first company marked it as fraud. Companies on two separate servers do not share reports unless an
+operator points both at one network database.
 
 ## How it works
 
@@ -159,9 +160,10 @@ it as fraud.
 |---|---|---|
 | `agent_scope`, `daily_cap`, `burst` | block / pause | Agent outside its licence, spending too fast, or stuck in a loop |
 | `provenance`, `currency` | block | No evidence, nobody who asked, wrong currency |
-| `unknown_vendor`, `lookalike_vendor`, `new_vendor_large` | block / pause | Fake, hallucinated or look-alike payees |
-| `known_fraud` | block | Account or domain reported by any company on the network |
-| `lookalike_domain`, `unknown_sender` | block / pause | Invoices and requests from domains that aren't the vendor's |
+| `unknown_vendor`, `lookalike_vendor`, `new_vendor`, `new_vendor_large` | block / pause | Fake, hallucinated or look-alike payees, and any payment to a vendor added in the last 30 days |
+| `known_fraud` | block | The account the money would go to, or an account or domain named in the request, reported by any company on this installation |
+| `display_name_spoof` | block | The sender's name shows one address and the message came from another |
+| `lookalike_domain`, `unknown_sender` | block / pause | Invoices and requests from domains that aren't the vendor's. A punycode name counts only when the decoded name is close |
 | `invoice_account_differs` | pause | Invoice prints a different account (redirection, prompt injection). Payment still goes to the account on file |
 | `recent_bank_change` | pause | Paying an account changed in the last 14 days |
 | `bank_change`, `shared_account` | pause / block | Any bank change needs a phone call to the number on file; another vendor's account is blocked |
@@ -200,11 +202,16 @@ the report has earned it.
 - **A real rail.** Implement `Rail.execute` for a bank or ERP payment API. The receipt contract is done.
 - **Bank-ownership verification.** Partner with an account-validation provider for "does this
   account belong to this company?"
-- **Approver app.** Passkey step-up on approve, and push. The API is there.
-- **Encryption at rest** for bank details, **PostgreSQL**, SSO. All already solved in the Invoice
-  Anomaly Detector and portable.
+- **Approver app.** Passkey step-up on approve, and push. The API and the phone-sized web app are there.
+- **PostgreSQL.** Each company is one SQLite file. A shared database server is not built.
+- **A fraud list across separate deployments.** Companies on one installation share `network/intel.db`.
+  Nothing syncs that file between customers who install separately.
 - **Bypass through other tools.** An agent that still has *other* payment tools can go around the
   checkpoint. Deployment has to remove them, and receipts make that enforceable at the bank.
+
+Bank details are encrypted at rest (AES-256-GCM, one key per company). Sign-in can be a password
+plus an authenticator code, or Microsoft Entra ID, Google Workspace, or any OpenID Connect provider.
+Both are in the product today. See [SECURITY.md](SECURITY.md).
 
 See [docs/MARKET.md](docs/MARKET.md) for the market case and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 for the design.
@@ -213,7 +220,8 @@ for the design.
 
 ```bash
 pip install -e ".[dev]"
-pytest -q          # 135 tests: checks, approvals, receipts, ledger tampering, network, MCP (incl. a real stdio process),
-                   # HTTP, CLI, quality bar, the security checklist, design rules, and a real browser (if Playwright is installed)
+pytest -q          # 197 tests, plus a real browser when Playwright is installed: checks, approvals, receipts,
+                   # ledger tampering, network, MCP (incl. a real stdio process), HTTP, CLI, quality bar,
+                   # the security checklist, and design rules
 ruff check src tests scripts
 ```

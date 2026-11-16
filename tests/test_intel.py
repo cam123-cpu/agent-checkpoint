@@ -47,6 +47,15 @@ def test_real_vendor_details_are_never_reported(gw, intel):
     assert intel.account_reports(gw.org.store.vendor("V1").bank_account) == 0
 
 
+def test_payment_to_a_reported_account_on_file_is_blocked_even_if_the_request_omits_it(gw, intel):
+    """The payee is the account on file. The request does not have to repeat it for the fraud list to apply."""
+    from conftest import ACCT
+    intel.report("beta", account=ACCT)
+    d = gw.submit(pay(), agent_id="ap")
+    assert d.verdict is Verdict.BLOCK and "known_fraud" in checks(d)
+    assert gw.org.store.payments() == []
+
+
 def test_network_stores_no_raw_account_numbers(intel):
     intel.report("acme", account=FRAUD)
     rows = intel.db.execute("SELECT value FROM reports").fetchall()

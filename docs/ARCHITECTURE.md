@@ -10,7 +10,7 @@ sequenceDiagram
     participant A as Agent (any vendor)
     participant M as MCP server (agent key only)
     participant G as Gateway
-    participant C as 19 checks
+    participant C as 20 checks
     participant H as Approver (phone)
     participant R as Rail (bank / ERP)
     participant L as Ledger

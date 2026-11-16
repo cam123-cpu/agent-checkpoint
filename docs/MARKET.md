@@ -52,6 +52,9 @@ Then expand by action type: invoices → refunds → payroll changes → procure
   finance.
 - **Bypass.** If deployments leave agents other payment paths, the checkpoint is advisory.
   Receipts plus rail and bank partnerships are the answer, and the hardest go-to-market work.
+- **The network is one file.** Fraud reports live in `network/intel.db` on a single installation.
+  Two customers on two servers do not see each other's reports until someone operates that as a
+  shared service. The moat starts there. It is not in the simulator.
 - **Base rates.** Most well-funded startups in hot categories don't reach $1B.
 
 ## The first 90 days

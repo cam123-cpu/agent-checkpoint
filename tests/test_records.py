@@ -126,7 +126,7 @@ def test_payment_run_finds_problems_and_changes_nothing(site):
     assert by_line[3]["verdict"] == "block" and "line 2 of this payment run" in by_line[3]["reasons"][0]
     assert by_line[4]["verdict"] == "block" and "payment file sends this to account ...0001" in by_line[4]["reasons"][0]
     assert by_line[5]["verdict"] == "go"  # no PO needed in a run; no account given means the account on file
-    assert by_line[6]["verdict"] == "block" and "not in the vendor master" in by_line[6]["reasons"][0]
+    assert by_line[6]["verdict"] == "block" and "not on the vendor list" in by_line[6]["reasons"][0]
     assert out["summary"]["block"]["count"] == 3
     assert (store.counts(), store.po("PO-1").billed_cents, len(gw.org.ledger.entries("decision"))) == before
     entry = gw.org.ledger.entries("payment_run_checked")[-1]["body"]
