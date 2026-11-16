@@ -72,8 +72,39 @@ def seed(home: str, password: str | None = None):
     return reg, gw
 
 
+SAMPLE_RUN = """Supplier,Invoice #,Amount,Pay to account,PO number
+Northwind Supplies,INV-NORTH-0099,"6,180.00",{north},
+Contoso Packaging,INV-CONTO-0010,"4,512.30",{conto},
+Fabrikam Freight,INV-FABRI-0001,"{fab1}",{fabri},
+Litware Components,INV-LITWA-0099,"8,950.00",GB29NWBK60161331926819,
+Wide World Importers,WW-9001,"5,310.00",{wide},
+Wide World Importers,WW-9001,"5,310.00",{wide},
+Tailspin Logistics,TS-7001,"9,000.00",{tails},
+Tailspin Logistics,TS-7002,"8,500.00",{tails},
+Globex Consulting,GX-44,"3,400.00",US12000333344445555,
+Proseware Cloud,INV-CLOUD-0004,"1,200.00",{cloud},
+Adventure Works Tooling,AW-9100,"112,000.00",{adven},
+"""
+
+
+def sample_run(gw) -> dict:
+    from agent_checkpoint.importers import read_payment_run
+    accts = {v.vendor_id: v.bank_account for v in gw.org.store.vendors()}
+    fab1 = next(p for p in gw.org.store.payments("V-FABRI", "pay"))
+    text = SAMPLE_RUN.format(north=accts["V-NORTH"], conto=accts["V-CONTO"], fabri=accts["V-FABRI"],
+                             wide=accts["V-WIDE"], tails=accts["V-TAILS"], cloud=accts["V-CLOUD"], adven=accts["V-ADVEN"],
+                             fab1=f"{fab1.amount_cents / 100:.2f}")
+    rows, errors = read_payment_run(gw.org.store, text)
+    out = gw.check_run(rows, ADMIN, "sample")
+    return {**out, "errors": errors}
+
+
 def snapshot(reg, gw) -> dict:
     return {
+        "payment_run_sample": sample_run(gw),
+        "setup": views.setup(gw, [{"email": ADMIN, "role": "admin", "disabled": False},
+                                  {"email": "cfo@acme-manufacturing.example", "role": "approver", "disabled": False}],
+                             {"ap-agent": 1, "crm-agent": 1, "ops-agent": 1}),
         "now": gw.clock().isoformat(),
         "me": {"email": ADMIN, "role": "admin", "company": gw.org.name, "mode": gw.org.policy.mode, "two_step": True,
                "setup_required": False, "require_two_step": True, "recovery_codes_left": 10},

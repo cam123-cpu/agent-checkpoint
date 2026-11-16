@@ -298,7 +298,7 @@ def test_sql_injection_is_inert(app):
 def test_sql_is_never_built_from_input():
     """Every f-string SQL in the code interpolates only module constants or fixed clauses."""
     src = os.path.join(os.path.dirname(__file__), "..", "src", "agent_checkpoint")
-    allowed = {"{_PAY_COLS}", "{table}", "{column}", "{ddl}"}  # the last three: the fixed ADDED list in accounts.py
+    allowed = {"{_PAY_COLS}", "{table}", "{column}", "{ddl}", "{verb}"}  # fixed: ADDED list in accounts.py; INSERT verb
     for f in os.listdir(src):
         if not f.endswith(".py"):
             continue

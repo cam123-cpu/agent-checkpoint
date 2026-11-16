@@ -39,13 +39,7 @@ CREATE TABLE IF NOT EXISTS pos (
     number TEXT PRIMARY KEY, vendor_id TEXT NOT NULL, amount_cents INTEGER NOT NULL CHECK (amount_cents > 0),
     billed_cents INTEGER NOT NULL DEFAULT 0
 );
-CREATE TABLE IF NOT EXISTS payments (
-    id INTEGER PRIMARY KEY, request_id TEXT NOT NULL UNIQUE, agent_id TEXT NOT NULL,
-    vendor_id TEXT NOT NULL, invoice_key TEXT NOT NULL, amount_cents INTEGER NOT NULL CHECK (amount_cents > 0),
-    bank_account TEXT NOT NULL, on_date TEXT NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('pay', 'refund')),
-    via TEXT NOT NULL CHECK (via IN ('rail', 'observed'))
-);
-CREATE INDEX IF NOT EXISTS payments_vendor ON payments (vendor_id, kind);
+-- payments: see PAYMENTS_DDL (kept separate so older databases can be upgraded)
 CREATE TABLE IF NOT EXISTS tickets (
     ticket_id TEXT PRIMARY KEY, request_id TEXT NOT NULL UNIQUE, request TEXT NOT NULL,
     findings TEXT NOT NULL, status TEXT NOT NULL, needed INTEGER NOT NULL,
@@ -58,6 +52,17 @@ CREATE TABLE IF NOT EXISTS transfers (
 CREATE TABLE IF NOT EXISTS activity (agent_id TEXT NOT NULL, at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS requests (request_id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, body TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS activity_agent ON activity (agent_id, at);
+"""
+
+
+PAYMENTS_DDL = """
+CREATE TABLE IF NOT EXISTS payments (
+    id INTEGER PRIMARY KEY, request_id TEXT NOT NULL UNIQUE, agent_id TEXT NOT NULL,
+    vendor_id TEXT NOT NULL, invoice_key TEXT NOT NULL, amount_cents INTEGER NOT NULL CHECK (amount_cents > 0),
+    bank_account TEXT NOT NULL, on_date TEXT NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('pay', 'refund')),
+    via TEXT NOT NULL CHECK (via IN ('rail', 'observed', 'imported'))
+);
+CREATE INDEX IF NOT EXISTS payments_vendor ON payments (vendor_id, kind);
 """
 
 
@@ -131,6 +136,12 @@ class Store:
         self.db = sqlite3.connect(path, check_same_thread=False, isolation_level=None, timeout=10)
         self.db.execute("PRAGMA busy_timeout = 10000")
         self.db.executescript(SCHEMA)
+        old = self.db.execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'payments'").fetchone()
+        if old and "'imported'" not in old[0]:  # upgrade: payments imported from history are a new kind of row
+            self.db.executescript(
+                "BEGIN; DROP INDEX IF EXISTS payments_vendor; ALTER TABLE payments RENAME TO payments_v1;" + PAYMENTS_DDL
+                + "INSERT INTO payments SELECT * FROM payments_v1; DROP TABLE payments_v1; COMMIT;")
+        self.db.executescript(PAYMENTS_DDL)
         if "payee_fp" not in {r[1] for r in self.db.execute("PRAGMA table_info(tickets)")}:
             self.db.execute("ALTER TABLE tickets ADD COLUMN payee_fp TEXT NOT NULL DEFAULT ''")
 
@@ -151,6 +162,20 @@ class Store:
                 if outer:
                     self.db.execute("ROLLBACK")
                 raise
+
+    @contextmanager
+    def scratch(self):
+        """A transaction that is always rolled back: for 'what would happen if' checks, like a payment run."""
+        with self._lock:
+            if self._depth:
+                raise RuntimeError("scratch() can't run inside another transaction")
+            self.db.execute("BEGIN IMMEDIATE")
+            self._depth += 1
+            try:
+                yield self
+            finally:
+                self._depth -= 1
+                self.db.execute("ROLLBACK")
 
     def q(self, sql: str, params=()) -> list[tuple]:
         with self._lock:
@@ -201,13 +226,17 @@ class Store:
 
     # --- payments ---------------------------------------------------------------------
 
-    def record_payment(self, p: Payment, po_number: str = "") -> None:
-        self.q(f"INSERT INTO payments ({_PAY_COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    def record_payment(self, p: Payment, po_number: str = "", ignore_existing: bool = False) -> bool:
+        verb = "INSERT OR IGNORE" if ignore_existing else "INSERT"
+        before = self.db.total_changes
+        self.q(f"{verb} INTO payments ({_PAY_COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                (p.request_id, p.agent_id, p.vendor_id, p.invoice_key, p.amount_cents,
                 self.crypto.encrypt(p.bank_account, f"payments.bank:{p.request_id}"),
                 p.on.isoformat(), p.kind, p.via))
-        if p.kind == "pay" and po_number:
+        inserted = self.db.total_changes > before
+        if inserted and p.kind == "pay" and po_number:
             self.q("UPDATE pos SET billed_cents = billed_cents + ? WHERE number = ?", (p.amount_cents, po_number))
+        return inserted
 
     def payments(self, vendor_id: str | None = None, kind: str | None = None) -> list[Payment]:
         sql, params = f"SELECT {_PAY_COLS} FROM payments WHERE 1 = 1", []
@@ -220,6 +249,16 @@ class Store:
     def spent_on(self, agent_id: str, on: date) -> int:
         return self.q("SELECT COALESCE(SUM(amount_cents), 0) FROM payments WHERE agent_id = ? AND on_date = ?",
                       (agent_id, on.isoformat()))[0][0]
+
+    def counts(self) -> dict:
+        return {
+            "vendors": self.q("SELECT COUNT(*) FROM vendors")[0][0],
+            "pos": self.q("SELECT COUNT(*) FROM pos")[0][0],
+            "history": self.q("SELECT COUNT(*) FROM payments WHERE via = 'imported'")[0][0],
+            "payments": self.q("SELECT COUNT(*) FROM payments WHERE kind = 'pay'")[0][0],
+            "vendors_with_history": self.q("SELECT COUNT(*) FROM (SELECT vendor_id FROM payments WHERE kind = 'pay' "
+                                           "GROUP BY vendor_id HAVING COUNT(*) >= 8)")[0][0],
+        }
 
     def all_pay_amounts(self) -> list[int]:
         return [r[0] for r in self.q("SELECT amount_cents FROM payments WHERE kind = 'pay'")]

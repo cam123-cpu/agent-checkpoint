@@ -204,6 +204,10 @@ class Accounts:
         if disabled:
             self._q("DELETE FROM sessions WHERE email = ?", (email.lower(),))
 
+    def org_of(self, email: str) -> str | None:
+        rows = self._q("SELECT org_id FROM users WHERE email = ?", (email.strip().lower(),))
+        return rows[0][0] if rows else None
+
     def users(self, org_id: str) -> list[dict]:
         return [{"email": r[0], "role": r[1], "disabled": bool(r[2]), "two_step": bool(r[3])}
                 for r in self._q("SELECT email, role, disabled, totp_enc FROM users WHERE org_id = ? ORDER BY email",

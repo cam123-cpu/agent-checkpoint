@@ -39,6 +39,7 @@ class Context:
     spent_today_cents: int = 0
     recent_actions: int = 0
     weights: dict[str, float] = field(default_factory=dict)
+    actor: str = "agent"  # agent | person (a request made in the web app) | run (a row of an uploaded payment run)
 
 
 _ADDR = re.compile(r"[^\s<>\"'(),;:@]+@([^\s<>\"'(),;:@]+)")
@@ -96,6 +97,8 @@ def check_display_spoof(req, ctx):
 # --- every action ---------------------------------------------------------------------
 
 def check_scope(req, ctx):
+    if ctx.actor != "agent":
+        return []  # people and payment runs aren't agents; their limits are the approval rules
     scope = ctx.policy.agents.get(req.agent_id)
     if scope is None:
         return [Finding("agent_scope", B, f"Agent {req.agent_id} is not registered with the checkpoint", 1.0)]
@@ -113,7 +116,7 @@ def check_scope(req, ctx):
 
 
 def check_burst(req, ctx):
-    if ctx.recent_actions >= ctx.policy.burst_per_minute:
+    if ctx.actor == "agent" and ctx.recent_actions >= ctx.policy.burst_per_minute:
         return [Finding("burst", P, f"{ctx.recent_actions} actions from this agent in the last minute: "
                                     "possible runaway loop", 0.6)]
     return []
@@ -168,6 +171,10 @@ def check_invoice_account(req, ctx):
     if req.action != "pay" or v is None or not req.bank_account_on_invoice:
         return []
     if norm_account(req.bank_account_on_invoice) != norm_account(v.bank_account):
+        if ctx.actor == "run":  # in a payment file, this IS where the money would go
+            return [Finding("payment_file_account", B,
+                            f"The payment file sends this to account {last4(req.bank_account_on_invoice)}, but the "
+                            f"account on file for {v.name} is {last4(v.bank_account)}", 0.95)]
         return [Finding("invoice_account_differs", P,
                         f"Invoice lists account {last4(req.bank_account_on_invoice)}, but the account on file for "
                         f"{v.name} is {last4(v.bank_account)}. Payment would go to the account on file; "
@@ -217,7 +224,8 @@ def check_po(req, ctx):
     if req.action != "pay":
         return []
     if not req.po_number:
-        if req.amount_cents > ctx.policy.require_po_above_cents:
+        # Payment runs list bills already approved in accounts payable, and rarely carry PO numbers.
+        if ctx.actor != "run" and req.amount_cents > ctx.policy.require_po_above_cents:
             return [Finding("no_po", P, f"No purchase order for a {money(req.amount_cents)} payment", 0.5)]
         return []
     po = ctx.store.po(req.po_number)
@@ -246,6 +254,9 @@ def check_duplicate(req, ctx):
     prior = ctx.store.payments(req.vendor_id, "pay")
     for p in prior:
         if key and p.invoice_key == key:
+            if p.request_id.startswith("run-L"):
+                return [Finding("duplicate_payment", B, f"Invoice {req.invoice_number} is also on line "
+                                                        f"{p.request_id[5:]} of this payment run", 0.95)]
             return [Finding("duplicate_payment", B, f"Invoice {req.invoice_number} was already paid on "
                                                     f"{p.on.isoformat()} ({money(p.amount_cents)})", 0.95)]
     waiting = ctx.store.open_ticket_for_invoice(req.vendor_id, key)
@@ -254,6 +265,9 @@ def check_duplicate(req, ctx):
                                                 f"(ticket {waiting['ticket_id']})", 0.9)]
     for p in prior:
         if p.amount_cents == req.amount_cents and abs((p.on - req.on).days) <= ctx.policy.near_duplicate_days:
+            if p.request_id.startswith("run-L"):
+                return [Finding("near_duplicate", P, f"Same amount to the same vendor on line {p.request_id[5:]} of this "
+                                                     "payment run, under a different invoice number", 0.5)]
             return [Finding("near_duplicate", P, f"Same amount paid to this vendor {abs((p.on - req.on).days)} days "
                                                  "earlier under a different invoice number", 0.5)]
     return []

@@ -20,7 +20,7 @@ def test_onboarding_flow(tmp_path, capsys):
     assert main(h + ["import-vendors", "acme", str(tmp_path / "v.csv")]) == 1   # one bad row reported
     assert main(h + ["import-pos", "acme", str(tmp_path / "p.csv")]) == 1
     err = capsys.readouterr().err
-    assert "line 3" in err and "unknown vendor V9" in err
+    assert "line 3" in err and "unknown vendor 'V9'" in err
     assert main(h + ["set-mode", "acme", "enforce"]) == 0
 
     from agent_checkpoint.tenancy import Registry

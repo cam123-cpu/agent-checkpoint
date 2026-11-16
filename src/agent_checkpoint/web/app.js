@@ -123,10 +123,11 @@
   const PAGES = {
     approvals: { title: "Approvals", render: renderApprovals },
     overview: { title: "Overview", render: renderOverview },
+    "payment-run": { title: "Payment run", render: renderPaymentRun },
     activity: { title: "Activity", render: renderActivity },
     "audit-log": { title: "Audit log", render: renderAudit },
     vendors: { title: "Vendors", render: renderVendors },
-    "company-settings": { title: "Settings", render: renderSettings },
+    setup: { title: "Setup", render: renderSettings },
     account: { title: "Your account", render: renderAccount, hidden: true },
   };
 
@@ -639,36 +640,140 @@
   // ---------- vendors ----------
   async function renderVendors() {
     const { vendors } = await api.get("vendors");
+    const isAdmin = state.me.role === "admin";
+    const canRequest = isAdmin || state.me.role === "approver";
+    const body = h("tbody", {});
+    for (const v of vendors) {
+      const panel = h("tr", { class: "why", hidden: true }, h("td", { colspan: "7" }));
+      const openPanel = (content) => { panel.firstChild.replaceChildren(content); panel.hidden = false; };
+      const actions = h("div", { class: "row" });
+      if (isAdmin) {
+        const edit = h("button", { type: "button", class: "plain" }, "Edit");
+        edit.addEventListener("click", () => openPanel(vendorEditForm(v)));
+        actions.append(edit);
+      }
+      if (canRequest) {
+        const bank = h("button", { type: "button", class: "plain" }, "Change bank account");
+        bank.addEventListener("click", () => openPanel(bankChangeForm(v)));
+        actions.append(bank);
+      }
+      body.append(h("tr", {},
+        h("td", {}, h("strong", { text: v.name }), h("div", { class: "muted", text: v.vendor_id })),
+        h("td", { text: v.account_on_file }), h("td", { text: v.email_domains.join(", ") || "None" }),
+        h("td", { text: v.bank_changed_on ? dateText(v.bank_changed_on) : "Never" }),
+        h("td", { class: "num", text: String(v.payments) }), h("td", { class: "num", text: money(v.paid_cents) }),
+        h("td", {}, actions)), panel);
+    }
     return [
-      h("h1", { text: "Vendors" }),
-      h("p", { class: "lede", text: "Payments always go to the account on file here. Agents can't change it without a person approving after a phone call." }),
+      h("div", { class: "row" }, h("h1", { text: "Vendors" })),
+      h("p", { class: "lede", text: "Payments always go to the account on file here. A bank account only changes through a request that a different person approves after phoning the vendor." }),
       vendors.length ? h("div", { class: "table-wrap" }, h("table", { class: "data" },
-        h("thead", {}, h("tr", {}, ["Vendor", "Account on file", "Email domains", "Bank changed", "Payments", "Paid"].map((x, i) =>
-          h("th", { scope: "col", class: i >= 4 ? "num" : false, text: x })))),
-        h("tbody", {}, vendors.map((v) => h("tr", {},
-          h("td", {}, h("strong", { text: v.name }), h("div", { class: "muted", text: v.vendor_id })),
-          h("td", { text: v.account_on_file }), h("td", { text: v.email_domains.join(", ") }),
-          h("td", { text: v.bank_changed_on ? dateText(v.bank_changed_on) : "Never" }),
-          h("td", { class: "num", text: String(v.payments) }), h("td", { class: "num", text: money(v.paid_cents) }))))))
-        : h("div", { class: "empty" }, h("p", { text: "No vendors yet. An admin can import your vendor list on the Settings page." })),
+        h("thead", {}, h("tr", {}, ["Vendor", "Account on file", "Email domains", "Bank changed", "Payments", "Paid", ""].map((x, i) =>
+          h("th", { scope: "col", class: i === 4 || i === 5 ? "num" : false, text: x })))), body))
+        : h("div", { class: "empty" }, h("p", { text: "No vendors yet. Import your vendor list on the Setup page, or add one below." })),
+      isAdmin ? addVendorForm() : null,
     ];
   }
 
-  // ---------- settings ----------
+  function vendorEditForm(v) {
+    const msg = formMessage();
+    const name = h("input", { type: "text", id: "ve-name-" + v.vendor_id, value: v.name, maxlength: "200" });
+    const domains = h("input", { type: "text", id: "ve-dom-" + v.vendor_id, value: v.email_domains.join(", ") });
+    const phone = h("input", { type: "text", id: "ve-ph-" + v.vendor_id, value: v.phone || "", maxlength: "40" });
+    return h("form", { novalidate: true, onsubmit: async (ev) => {
+      ev.preventDefault();
+      try {
+        await api.post("vendors/" + encodeURIComponent(v.vendor_id), { name: name.value, email_domains: domains.value, phone: phone.value });
+        toast("Vendor saved"); render();
+      } catch (e) { showMessage(msg, false, e.message); }
+    } }, field(name.id, "Name", name), field(domains.id, "Email domains", domains, "Separate with commas, e.g. northwind.com, northwind-billing.com"),
+      field(phone.id, "Phone number for confirming bank changes", phone),
+      h("p", { class: "small muted", text: "The bank account can't be edited here. Use Change bank account." }),
+      h("div", { class: "row" }, h("button", { type: "submit" }, "Save vendor")), msg);
+  }
+
+  function bankChangeForm(v) {
+    const msg = formMessage();
+    const acct = h("input", { type: "text", id: "bc-" + v.vendor_id, maxlength: "64", autocomplete: "off" });
+    const note = h("input", { type: "text", id: "bcn-" + v.vendor_id, maxlength: "300", placeholder: "e.g. Letter from vendor dated Nov 10" });
+    return h("form", { novalidate: true, onsubmit: async (ev) => {
+      ev.preventDefault();
+      try {
+        const d = await api.post("vendors/" + encodeURIComponent(v.vendor_id) + "/bank-change", { new_account: acct.value.trim(), note: note.value.trim() });
+        showMessage(msg, d.verdict !== "block", d.verdict === "block" ? "Blocked: " + d.findings.map((f) => f.message).join(" ")
+          : "Request sent for approval. Another approver must phone the vendor on the number on file before approving it.");
+      } catch (e) { showMessage(msg, false, e.message); }
+    } }, h("p", { text: "Account on file now: " + v.account_on_file + ". The change needs a different approver, who must call the vendor on the number on file." }),
+      field(acct.id, "New bank account", acct), field(note.id, "Where the new details came from", note),
+      h("div", { class: "row" }, h("button", { type: "submit" }, "Request bank change")), msg);
+  }
+
+  function addVendorForm() {
+    const msg = formMessage();
+    const inputs = {
+      vendor_id: h("input", { type: "text", id: "nv-id", maxlength: "64" }), name: h("input", { type: "text", id: "nv-name", maxlength: "200" }),
+      bank_account: h("input", { type: "text", id: "nv-bank", maxlength: "64", autocomplete: "off" }),
+      email_domains: h("input", { type: "text", id: "nv-dom" }), phone: h("input", { type: "text", id: "nv-phone", maxlength: "40" }),
+    };
+    return h("details", { class: "more panel" }, h("summary", { text: "Add a vendor" }),
+      h("form", { novalidate: true, onsubmit: async (ev) => {
+        ev.preventDefault();
+        try {
+          await api.post("vendors", Object.fromEntries(Object.entries(inputs).map(([k, el]) => [k, el.value.trim()])));
+          toast("Vendor added"); render();
+        } catch (e) { showMessage(msg, false, e.message); }
+      } }, field("nv-id", "Vendor ID (as in your accounting system)", inputs.vendor_id), field("nv-name", "Name", inputs.name),
+        field("nv-bank", "Bank account", inputs.bank_account), field("nv-dom", "Email domains", inputs.email_domains, "So emails claiming to be from this vendor can be checked."),
+        field("nv-phone", "Phone number", inputs.phone, "Used to confirm any future bank change."),
+        h("div", { class: "row" }, h("button", { type: "submit" }, "Add vendor")), msg));
+  }
+
+  // ---------- shared bits for forms ----------
+  function field(id, label, input, hint) {
+    input.id = input.id || id;
+    return h("div", { class: "field" }, h("label", { for: input.id, text: label }), input,
+      hint ? h("p", { class: "hint", text: hint }) : null);
+  }
+  function formMessage() { return h("p", { role: "status", hidden: true }); }
+  function showMessage(el, ok, text) { el.className = ok ? "notice ok" : "notice error"; el.textContent = text; el.hidden = false; }
+  function once(title, secret, note, extra) {
+    const copy = h("button", { type: "button", class: "secondary" }, "Copy");
+    copy.addEventListener("click", () => copyText(secret, "Copied"));
+    return h("div", { class: "notice ok" }, h("p", {}, h("strong", { text: title })),
+      h("p", { class: "key", text: secret }), h("div", { class: "row" }, copy),
+      h("p", { class: "small", text: note }), extra || null);
+  }
+
+  // ---------- setup ----------
   async function renderSettings() {
-    const s = await api.get("settings");
+    const [s, setup] = await Promise.all([api.get("settings"), api.get("setup")]);
     const isAdmin = state.me.role === "admin";
-    const msg = h("p", { role: "status", hidden: true });
+    const parts = [h("h1", { text: "Setup" }), checklist(setup), rulesForm(s, isAdmin), recordsPanel(isAdmin),
+      agentsPanel(s, isAdmin), peoplePanel(s.users, isAdmin)];
+    return parts;
+  }
+
+  function checklist(setup) {
+    return h("section", { class: "panel" },
+      h("h2", { text: "Getting started (" + setup.done + " of " + setup.steps.length + " done)" }),
+      h("ol", { class: "checklist" }, setup.steps.map((st) => h("li", { class: st.done ? "done" : "" },
+        h("span", { class: "verdict " + (st.done ? "go" : "pause"), text: st.done ? "Done" : "To do" }), " ",
+        h("strong", { text: st.title }), h("div", { class: "muted small", text: st.detail })))),
+      setup.health.map((x) => h("p", { class: x.level === "warn" ? "notice" : "small muted", text: x.text })));
+  }
+
+  function rulesForm(s, isAdmin) {
+    const msg = formMessage();
     const dollars = (c) => (c / 100).toFixed(2);
     const modeShadow = h("input", { type: "radio", name: "mode", id: "mode-shadow", value: "shadow", checked: s.mode === "shadow", disabled: !isAdmin });
     const modeEnforce = h("input", { type: "radio", name: "mode", id: "mode-enforce", value: "enforce", checked: s.mode === "enforce", disabled: !isAdmin });
-    const limit = h("input", { type: "text", inputmode: "decimal", id: "s-limit", value: dollars(s.approval_limit_cents), disabled: !isAdmin });
-    const dual = h("input", { type: "text", inputmode: "decimal", id: "s-dual", value: dollars(s.dual_approval_cents), disabled: !isAdmin });
-    const days = h("input", { type: "number", id: "s-days", min: "1", max: "365", value: s.recent_bank_change_days, disabled: !isAdmin });
-    const hours = h("input", { type: "number", id: "s-hours", min: "1", max: "720", value: s.ticket_hours, disabled: !isAdmin });
+    const limit = h("input", { type: "text", inputmode: "decimal", value: dollars(s.approval_limit_cents), disabled: !isAdmin });
+    const dual = h("input", { type: "text", inputmode: "decimal", value: dollars(s.dual_approval_cents), disabled: !isAdmin });
+    const days = h("input", { type: "number", min: "1", max: "365", value: s.recent_bank_change_days, disabled: !isAdmin });
+    const hours = h("input", { type: "number", min: "1", max: "720", value: s.ticket_hours, disabled: !isAdmin });
     const require2 = h("input", { type: "checkbox", id: "s-2step", checked: s.require_two_step, disabled: !isAdmin });
-    const save = h("button", { type: "submit" }, "Save settings");
-    const form = h("form", { class: "panel", onsubmit: async (ev) => {
+    const save = h("button", { type: "submit" }, "Save rules");
+    return h("form", { class: "panel", novalidate: true, onsubmit: async (ev) => {
       ev.preventDefault();
       msg.hidden = true;
       save.disabled = true;
@@ -679,70 +784,256 @@
           require_two_step: require2.checked,
         });
         state.me = await api.get("me");
-        toast("Settings saved");
+        toast("Rules saved");
         render();
-      } catch (e) {
-        msg.className = "notice error";
-        msg.textContent = e.message;
-        msg.hidden = false;
-        save.disabled = false;
-      }
+      } catch (e) { showMessage(msg, false, e.message); save.disabled = false; }
     } },
       h("h2", { text: "Rules" }),
-      h("fieldset", { class: "field" }, h("legend", { class: "small", text: "Mode" }),
+      h("fieldset", { class: "field" }, h("legend", { text: "Mode" }),
         h("label", { class: "check", for: "mode-shadow" }, modeShadow, h("span", { text: "Watch only: record what would be stopped, block nothing" })),
         h("label", { class: "check", for: "mode-enforce" }, modeEnforce, h("span", { text: "Enforce: agents wait for checks and approvals" }))),
-      h("div", { class: "field" }, h("label", { for: "s-limit", text: "Payments at or above this amount need a person (USD)" }), limit),
-      h("div", { class: "field" }, h("label", { for: "s-dual", text: "At or above this amount, two different people must approve (USD)" }), dual),
-      h("div", { class: "field" }, h("label", { for: "s-days", text: "Hold payments to a newly changed bank account for this many days" }), days),
-      h("div", { class: "field" }, h("label", { for: "s-hours", text: "Reject requests nobody answers within this many hours" }), hours),
+      field("s-limit", "Payments at or above this amount need a person (USD)", limit),
+      field("s-dual", "At or above this amount, two different people must approve (USD)", dual),
+      field("s-days", "Hold payments to a newly changed bank account for this many days", days),
+      field("s-hours", "Reject requests nobody answers within this many hours", hours),
       h("div", { class: "field" }, h("label", { class: "check", for: "s-2step" }, require2,
         h("span", { text: "Require two-step sign-in for everyone who signs in with a password" })),
         h("p", { class: "hint", text: "People without it are asked to set it up at their next sign-in. Company single sign-on counts as two-step." })),
-      isAdmin ? h("div", { class: "row" }, save, msg) : h("p", { class: "muted", text: "Only admins can change these." }));
-
-    const imports = isAdmin ? h("section", { class: "panel" },
-      h("h2", { text: "Import vendors and purchase orders" }),
-      h("p", { class: "small muted", text: "CSV files up to 1 MB. Vendors need vendor_id, name, bank_account, email_domains (separated by ;), created_on, phone. Purchase orders need number, vendor_id, amount." }),
-      uploadField("vendors", "Vendor list"), uploadField("pos", "Purchase orders")) : null;
-
-    return [
-      h("h1", { text: "Settings" }), form,
-      h("section", { class: "panel" }, h("h2", { text: "Agents" }),
-        h("div", { class: "table-wrap" }, h("table", { class: "data" },
-          h("thead", {}, h("tr", {}, ["Agent", "Made by", "Allowed to", "Limit per action", "Daily limit"].map((x, i) =>
-            h("th", { scope: "col", class: i >= 3 ? "num" : false, text: x })))),
-          h("tbody", {}, s.agents.map((a) => h("tr", {},
-            h("td", { text: a.agent_id }), h("td", { text: a.made_by || "Not recorded" }),
-            h("td", { text: a.allowed_actions.map((x) => ACTION[x] || x).join(", ") }),
-            h("td", { class: "num", text: money(a.max_amount_cents) }), h("td", { class: "num", text: money(a.daily_cap_cents) }))))))),
-      h("section", { class: "panel" }, h("h2", { text: "People" }),
-        h("table", { class: "statement" }, h("tbody", {}, s.users.map((u) => h("tr", {},
-          h("td", { text: u.email }),
-          h("td", { class: "muted", text: u.two_step ? "Two-step on" : "Two-step off" }),
-          h("td", { class: "num", text: u.role + (u.disabled ? ", disabled" : "") })))))),
-      imports,
-    ];
+      isAdmin ? h("div", { class: "row" }, save) : h("p", { class: "muted", text: "Only admins can change these." }), msg);
   }
 
-  function uploadField(kind, label) {
-    const input = h("input", { type: "file", id: "up-" + kind, accept: ".csv,text/csv" });
+  function recordsPanel(isAdmin) {
+    if (!isAdmin) return null;
+    const order = h("select", { id: "hist-order" }, h("option", { value: "mdy" }, "Month first (03/14/2026)"),
+      h("option", { value: "dmy" }, "Day first (14/03/2026)"));
+    return h("section", { class: "panel" },
+      h("h2", { text: "Your records" }),
+      h("p", { class: "small muted", text: "Export from your accounting system or Excel and save as CSV UTF-8 (in Excel: File, Save As). Column names are matched by meaning, so \"Supplier\", \"Vendor name\" and \"Payee\" all work. Files up to 1 MB. Importing never changes an existing vendor's bank account." }),
+      uploadField("import/vendors", "Vendor list", "Needs: name and bank account. Also useful: vendor ID, email domain, phone number."),
+      uploadField("import/pos", "Open purchase orders", "Needs: PO number, vendor, amount."),
+      h("div", { class: "field" }, h("label", { for: "hist-order", text: "Dates in your payment history file are" }), order),
+      uploadField("import/history", "Past payments (6 to 12 months)", "Needs: vendor, invoice number, amount, payment date. Importing the same file twice adds nothing twice.", () => "?date_order=" + order.value),
+      addPoForm());
+  }
+
+  function addPoForm() {
+    const msg = formMessage();
+    const vendor = h("select", { id: "po-vendor" }, h("option", { value: "" }, "Loading vendors"));
+    api.get("vendors").then((r) => vendor.replaceChildren(h("option", { value: "" }, "Choose a vendor"),
+      ...r.vendors.map((v) => h("option", { value: v.vendor_id }, v.name)))).catch(() => {});
+    const number = h("input", { type: "text", id: "po-number", maxlength: "64" });
+    const amount = h("input", { type: "text", id: "po-amount", inputmode: "decimal" });
+    return h("details", { class: "more" }, h("summary", { text: "Add one purchase order" }),
+      h("form", { novalidate: true, onsubmit: async (ev) => {
+        ev.preventDefault();
+        try {
+          await api.post("pos", { number: number.value.trim(), vendor_id: vendor.value, amount: amount.value.trim() });
+          showMessage(msg, true, "Purchase order " + number.value.trim() + " added.");
+          number.value = ""; amount.value = "";
+        } catch (e) { showMessage(msg, false, e.message); }
+      } }, field("po-vendor", "Vendor", vendor), field("po-number", "PO number", number), field("po-amount", "Amount (USD)", amount),
+        h("div", { class: "row" }, h("button", { type: "submit" }, "Add purchase order")), msg));
+  }
+
+  function agentsPanel(s, isAdmin) {
+    const actionsLabel = (xs) => xs.map((x) => ACTION[x] || x).join(", ");
+    const rows = s.agents.map((a) => {
+      const remove = h("button", { type: "button", class: "plain" }, "Remove");
+      remove.addEventListener("click", async () => {
+        if (remove.dataset.armed !== "1") { remove.dataset.armed = "1"; remove.textContent = "Click again to remove"; return; }
+        try { await api.post("agents/" + encodeURIComponent(a.agent_id) + "/remove", {}); toast("Agent removed; its keys no longer work"); render(); }
+        catch (e) { toast(e.message); }
+      });
+      return h("tr", {}, h("td", {}, h("strong", { text: a.agent_id }), h("div", { class: "muted", text: a.made_by || "" })),
+        h("td", { text: actionsLabel(a.allowed_actions) }), h("td", { class: "num", text: money(a.max_amount_cents) }),
+        h("td", { class: "num", text: money(a.daily_cap_cents) }), h("td", {}, isAdmin ? remove : ""));
+    });
+    return h("section", { class: "panel" }, h("h2", { text: "Agents" }),
+      h("p", { class: "small muted", text: "Each agent gets its own key and limits. Give agents these tools instead of direct access to your bank or accounting system; otherwise they can go around the checkpoint." }),
+      s.agents.length ? h("div", { class: "table-wrap" }, h("table", { class: "data" },
+        h("thead", {}, h("tr", {}, ["Agent", "Allowed to", "Limit per action", "Daily limit", ""].map((x, i) =>
+          h("th", { scope: "col", class: i === 2 || i === 3 ? "num" : false, text: x })))), h("tbody", {}, rows)))
+        : h("p", { class: "muted", text: "No agents yet." }),
+      isAdmin ? addAgentForm() : null);
+  }
+
+  function addAgentForm() {
+    const msg = formMessage();
+    const out = h("div", {});
+    const name = h("input", { type: "text", id: "ag-name", maxlength: "41", placeholder: "ap-agent" });
+    const madeBy = h("input", { type: "text", id: "ag-by", maxlength: "80", placeholder: "Claude, Salesforce, in-house" });
+    const boxes = Object.keys(ACTION).map((k) => h("input", { type: "checkbox", id: "ag-" + k, value: k, checked: k === "pay" }));
+    const max = h("input", { type: "text", id: "ag-max", inputmode: "decimal", value: "25000" });
+    const day = h("input", { type: "text", id: "ag-day", inputmode: "decimal", value: "100000" });
+    return h("details", { class: "more" }, h("summary", { text: "Connect a new agent" }),
+      h("form", { novalidate: true, onsubmit: async (ev) => {
+        ev.preventDefault();
+        msg.hidden = true;
+        try {
+          const r = await api.post("agents", { agent_id: name.value.trim().toLowerCase(), made_by: madeBy.value.trim(),
+            allowed_actions: boxes.filter((b) => b.checked).map((b) => b.value), max_amount: max.value.trim(), daily_cap: day.value.trim() });
+          const config = JSON.stringify({ mcpServers: { "agent-checkpoint": { command: "agent-checkpoint",
+            args: ["mcp", "--url", location.origin], env: { CHECKPOINT_AGENT_KEY: r.key } } } }, null, 2);
+          const copyConfig = h("button", { type: "button", class: "secondary" }, "Copy MCP config");
+          copyConfig.addEventListener("click", () => copyText(config, "MCP config copied"));
+          out.replaceChildren(once("Key for " + r.agent_id + " (shown once)", r.key,
+            "Store it like a password. If it's lost, remove the agent and connect it again.",
+            h("div", {}, h("p", { class: "small", text: "For Claude or any MCP client, add this to its MCP settings:" }),
+              h("pre", { class: "config", text: config }), copyConfig,
+              h("p", { class: "small", text: "Other agents call the HTTP API at " + location.origin + "/v1/actions with the header Authorization: Bearer <key>." }))));
+          name.value = "";
+        } catch (e) { showMessage(msg, false, e.message); }
+      } },
+        field("ag-name", "Agent name", name, "Lowercase letters, digits and dashes."),
+        field("ag-by", "Made by (optional)", madeBy),
+        h("fieldset", { class: "field" }, h("legend", { text: "Allowed to" }),
+          boxes.map((b) => h("label", { class: "check", for: b.id }, b, h("span", { text: ACTION[b.value] })))),
+        field("ag-max", "Limit per action (USD)", max), field("ag-day", "Daily limit (USD)", day),
+        h("div", { class: "row" }, h("button", { type: "submit" }, "Create agent and key")), msg), out);
+  }
+
+  function peoplePanel(users, isAdmin) {
+    const rows = users.map((u) => {
+      const actions = h("div", { class: "row" });
+      if (isAdmin && u.email !== state.me.email) {
+        const toggle = h("button", { type: "button", class: "plain" }, u.disabled ? "Enable" : "Disable");
+        toggle.addEventListener("click", () => personAction(u.email, u.disabled ? "enable" : "disable"));
+        actions.append(toggle);
+      }
+      if (isAdmin && u.two_step) {
+        const reset = h("button", { type: "button", class: "plain" }, "Reset two-step");
+        reset.addEventListener("click", () => personAction(u.email, "reset-two-step"));
+        actions.append(reset);
+      }
+      return h("tr", {}, h("td", { text: u.email }), h("td", { text: u.role }),
+        h("td", { class: "muted", text: (u.two_step ? "Two-step on" : "Two-step off") + (u.disabled ? ", disabled" : "") }),
+        h("td", {}, actions));
+    });
+    return h("section", { class: "panel" }, h("h2", { text: "People" }),
+      h("div", { class: "table-wrap" }, h("table", { class: "data" },
+        h("thead", {}, h("tr", {}, ["Email", "Role", "Status", ""].map((x) => h("th", { scope: "col", text: x })))),
+        h("tbody", {}, rows))),
+      h("p", { class: "small muted", text: "Admins change settings and records and can approve. Approvers approve. Auditors can see everything and change nothing." }),
+      isAdmin ? addPersonForm() : null);
+  }
+
+  async function personAction(email, what) {
+    try {
+      await api.post("people/" + encodeURIComponent(email) + "/" + what, {});
+      toast({ disable: "Disabled; their sessions ended", enable: "Enabled", "reset-two-step": "Two-step reset; they set it up again at sign-in" }[what]);
+      render();
+    } catch (e) { toast(e.message); }
+  }
+
+  function addPersonForm() {
+    const msg = formMessage();
+    const out = h("div", {});
+    const email = h("input", { type: "email", id: "pp-email", autocomplete: "off" });
+    const role = h("select", { id: "pp-role" }, ["approver", "auditor", "admin"].map((r) => h("option", { value: r }, r)));
+    return h("details", { class: "more" }, h("summary", { text: "Add a person" }),
+      h("form", { novalidate: true, onsubmit: async (ev) => {
+        ev.preventDefault();
+        msg.hidden = true;
+        try {
+          const r = await api.post("people", { email: email.value.trim(), role: role.value });
+          out.replaceChildren(once("Temporary password for " + r.email + " (shown once)", r.temporary_password,
+            "Send it to them privately. They should change it under Your account after signing in."));
+          email.value = "";
+        } catch (e) { showMessage(msg, false, e.message); }
+      } }, field("pp-email", "Email", email), field("pp-role", "Role", role),
+        h("div", { class: "row" }, h("button", { type: "submit" }, "Add person")), msg), out);
+  }
+
+  function uploadField(path, label, hint, extra) {
+    const input = h("input", { type: "file", id: "up-" + path.replace(/\W/g, "-"), accept: ".csv,text/csv" });
     const out = h("p", { class: "small", role: "status" });
     input.addEventListener("change", async () => {
       const file = input.files && input.files[0];
       out.className = "small";
       if (!file) return;
       if (file.size > 1024 * 1024) { out.className = "notice error"; out.textContent = "That file is over 1 MB."; return; }
-      if (!/\.csv$/i.test(file.name)) { out.className = "notice error"; out.textContent = "Choose a .csv file."; return; }
+      if (!/\.csv$/i.test(file.name)) { out.className = "notice error"; out.textContent = "Choose a .csv file. In Excel: File, Save As, CSV UTF-8."; return; }
       out.textContent = "Importing";
       try {
-        const r = await api.upload("import/" + kind, await file.text());
+        const r = await api.upload(path + (extra ? extra() : ""), await file.text());
         out.className = r.errors.length ? "notice error" : "notice ok";
-        out.textContent = "Imported " + r.imported + " rows." + (r.errors.length ? " Skipped: " + r.errors.join("; ") : "");
+        out.textContent = "Imported " + r.imported + " rows." + (r.already_there ? " " + r.already_there + " were already there." : "") +
+          (r.errors.length ? " Skipped: " + r.errors.join("; ") : "");
       } catch (e) { out.className = "notice error"; out.textContent = e.message; }
       input.value = "";
     });
-    return h("div", { class: "field" }, h("label", { for: input.id, text: label }), input, out);
+    return h("div", { class: "field" }, h("label", { for: input.id, text: label }), input,
+      hint ? h("p", { class: "hint", text: hint }) : null, out);
+  }
+
+  // ---------- payment run ----------
+  const RUN = { go: "Ready to pay", pause: "Review first", block: "Don't pay" };
+  const runTag = (v) => h("span", { class: "verdict " + v, text: RUN[v] });
+
+  async function renderPaymentRun() {
+    const canRun = state.me.role === "admin" || state.me.role === "approver";
+    const results = h("div", {});
+    const input = h("input", { type: "file", id: "run-file", accept: ".csv,text/csv", disabled: !canRun });
+    const go = h("button", { type: "button", disabled: !canRun }, "Check this payment run");
+    async function run(text, name) {
+      results.replaceChildren(h("p", { class: "muted", text: "Checking " + name }));
+      try {
+        const r = await api.upload("payment-run", text);
+        results.replaceChildren(...runResults(r, name));
+      } catch (e) { results.replaceChildren(errorBox(e)); }
+    }
+    go.addEventListener("click", async () => {
+      const file = input.files && input.files[0];
+      if (!file) return toast("Choose a CSV file first.");
+      if (file.size > 1024 * 1024) return toast("That file is over 1 MB.");
+      run(await file.text(), file.name);
+    });
+    const sample = window.CHECKPOINT_DEMO && window.CHECKPOINT_DEMO.payment_run_sample;
+    const sampleBtn = sample ? h("button", { type: "button", class: "secondary" }, "Use the sample payment run") : null;
+    if (sampleBtn) sampleBtn.addEventListener("click", () => results.replaceChildren(...runResults(sample, "the sample payment run")));
+    return [
+      h("h1", { text: "Check a payment run" }),
+      h("p", { class: "lede", text: "Upload the bills you're about to pay, before you release them. Each one goes through the same checks as an agent's payment: the bank account on file, duplicates (in this file and in past payments), purchase orders, splits, unusual amounts and your approval limits. Nothing is paid or changed; the check is recorded in the audit log." }),
+      h("div", { class: "panel" },
+        field("run-file", "Payment run (CSV)", input, "Needs: vendor and amount. Also useful: invoice number, bank account the payment goes to, PO number. Up to 1 MB."),
+        h("div", { class: "row" }, go, sampleBtn),
+        canRun ? null : h("p", { class: "muted", text: "Admins and approvers can check payment runs." })),
+      results,
+    ];
+  }
+
+  function runResults(r, name) {
+    const sum = r.summary;
+    const csv = () => {
+      const cell = (v) => { let s = String(v); if (/^[=+\-@\t\r]/.test(s)) s = "'" + s; return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+      const lines = [["Line", "Vendor", "Invoice", "Amount", "Decision", "Reasons"]].concat(r.rows.map((x) =>
+        [x.line, x.vendor_name, x.invoice_number, (x.amount_cents / 100).toFixed(2), RUN[x.verdict], x.reasons.join("; ")]));
+      return lines.map((l) => l.map(cell).join(",")).join("\n");
+    };
+    const dl = h("button", { type: "button", class: "secondary" }, "Download results (CSV)");
+    dl.addEventListener("click", () => {
+      if (window.CHECKPOINT_DEMO_NO_DOWNLOADS) return toast("Downloads are turned off in this shared demo.");
+      const url = URL.createObjectURL(new Blob([csv()], { type: "text/csv" }));
+      const a = h("a", { href: url, download: "payment-run-checked.csv" });
+      document.body.append(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    });
+    return [
+      h("div", { class: "panel" },
+        h("p", { class: "big-sentence", text: "Checked " + count(r.rows.length, "payment", "payments") + " in " + name + "." }),
+        h("table", { class: "statement" }, h("tbody", {}, ["go", "pause", "block"].map((v) => h("tr", {},
+          h("td", {}, runTag(v)), h("td", { class: "num", text: String(sum[v].count) }), h("td", { class: "num", text: money(sum[v].amount_cents) }))))),
+        r.errors && r.errors.length ? h("p", { class: "notice error", text: "Rows that couldn't be read: " + r.errors.join("; ") }) : null,
+        h("div", { class: "row" }, dl)),
+      h("div", { class: "table-wrap" }, h("table", { class: "data" },
+        h("thead", {}, h("tr", {}, ["Line", "Vendor", "Invoice", "Amount", "Decision", "Why"].map((x, i) =>
+          h("th", { scope: "col", class: i === 3 ? "num" : false, text: x })))),
+        h("tbody", {}, r.rows.map((x) => h("tr", {},
+          h("td", { text: String(x.line) }), h("td", { text: x.vendor_name }), h("td", { text: x.invoice_number }),
+          h("td", { class: "num", text: money(x.amount_cents) }), h("td", {}, runTag(x.verdict)),
+          h("td", {}, x.reasons.length ? h("ul", { class: "reasons" }, x.reasons.map((m) => h("li", { text: m })))
+            : h("span", { class: "muted", text: "No problems found." }))))))),
+    ];
   }
 
   window.addEventListener("hashchange", () => { if (state.me) render(); });

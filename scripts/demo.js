@@ -78,7 +78,11 @@
           (!q || r.vendor_name.toLowerCase().includes(q) || r.invoice_number.toLowerCase().includes(q))) };
       }
       if (route === "audit") return D.audit;
-      if (route === "vendors") return { vendors: D.vendors };
+      if (route === "vendors" && method === "GET") return { vendors: D.vendors };
+      if (route === "setup") return D.setup;
+      if (route === "payment-run") fail(403, "Uploading is turned off in this demo. Use the sample payment run instead.");
+      if (method === "POST" && /^(vendors|pos|agents|people)(\/|$)/.test(route))
+        fail(403, "Changing records is turned off in this demo. In the real app, admins do this here.");
       if (route === "settings" && method === "GET") return D.settings;
       if (route === "settings" && method === "POST") {
         const toCents = (s) => Math.round(Number(String(s).replace(/,/g, "")) * 100);
