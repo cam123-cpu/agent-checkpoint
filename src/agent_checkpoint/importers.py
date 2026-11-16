@@ -179,12 +179,16 @@ def _domains(raw: str) -> tuple[str, ...]:
 
 def import_vendors(store: Store, text: str) -> tuple[int, list[str]]:
     errors, vendors = [], []
+    first_load = not store.vendors()
     for n, r in _records(text, ["name", "bank_account"], ["vendor_id", "email_domains", "created_on", "phone"]):
         try:
             vid = (r.get("vendor_id") or "V-" + re.sub(r"[^A-Z0-9]", "", r["name"].upper())[:20])[:64]
             if not r["name"] or not r["bank_account"]:
                 raise ValueError("name and bank account are required")
-            created = parse_date(r["created_on"]) if r.get("created_on") else date(2000, 1, 1)
+            # No date: on the first load into an empty list these are long-standing vendors. Added later, a vendor
+            # is new today, so the new-vendor checks apply to it.
+            created = parse_date(r["created_on"]) if r.get("created_on") else (date(2000, 1, 1) if first_load
+                                                                               else date.today())
             existing = store.vendor(vid)
             if existing and norm_account(existing.bank_account) != norm_account(r["bank_account"]):
                 raise ValueError(f"{vid}: the bank account differs from the one on file. Bank details "
@@ -219,7 +223,16 @@ def import_pos(store: Store, text: str) -> tuple[int, list[str]]:
         try:
             v = find(r)
             billed = parse_amount(r["billed"]) if r.get("billed") not in (None, "", "0", "0.00") else 0
-            pos.append(PurchaseOrder(r["number"][:64], v.vendor_id, parse_amount(r["amount"]), billed))
+            po = PurchaseOrder(r["number"][:64], v.vendor_id, parse_amount(r["amount"]), billed)
+            existing = store.po(po.number)
+            if existing and existing.vendor_id != po.vendor_id:
+                raise ValueError(f"PO {po.number} is for another vendor on file. A file can't move a purchase order")
+            if existing and po.amount_cents > existing.amount_cents:
+                raise ValueError(f"PO {po.number} would go up from {existing.amount_cents / 100:,.2f}. Raise it in "
+                                 "the purchasing system and have it approved there, not by importing a file")
+            if existing:
+                po = PurchaseOrder(po.number, po.vendor_id, po.amount_cents, max(existing.billed_cents, po.billed_cents))
+            pos.append(po)
         except ValueError as exc:
             errors.append(f"line {n}: {exc}")
     with store.tx():

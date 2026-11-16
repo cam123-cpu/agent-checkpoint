@@ -333,3 +333,23 @@ def test_release_and_evidence_over_the_web(site):
     assert status == 200 and ev["held_fraud"] == 1 and ev["misses_recorded"] == 1 and "PUBLIC KEY" in ev["public_key"]
     status, lst, _ = approver.req("POST", "/api/web/allowed-accounts", {})
     assert status == 200 and lst["body"]["version"] == 1 and len(lst["body"]["accounts"]) == 2
+
+
+def test_po_import_cannot_move_or_raise_an_existing_po(site):
+    _, gw, _, _ = site
+    from agent_checkpoint.importers import import_pos
+    store = gw.org.store
+    n, errors = import_pos(store, "PO number,Vendor,Amount\nPO-1,Contoso,50000.00\nPO-1,Northwind Supplies,90000.00\n"
+                                  "PO-1,Northwind Supplies,40000.00\nPO-9,Contoso,10.00\n")
+    assert len(errors) == 2 and "another vendor" in errors[0] and "go up" in errors[1]
+    assert store.po("PO-1").vendor_id == "V1" and store.po("PO-1").amount_cents == 40_000_00
+    assert store.po("PO-9").vendor_id == "V2"
+
+
+def test_vendor_added_later_without_a_date_is_new(tmp_path):
+    from datetime import date as d
+    store = Store(str(tmp_path / "b.db"), b"k" * 32)
+    import_vendors(store, "name,bank account\nOld Co,US0001112223334\n")
+    assert store.vendor("V-OLDCO").created_on == d(2000, 1, 1)  # first load: long-standing vendors
+    import_vendors(store, "name,bank account\nNew Co,US0005556667778\n")
+    assert store.vendor("V-NEWCO").created_on == d.today()  # added later: new, so new-vendor checks apply

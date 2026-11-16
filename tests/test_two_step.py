@@ -102,9 +102,11 @@ def test_disable_needs_password_and_code(acc):
 def test_required_two_step_gives_a_limited_session(acc):
     r = acc.login("a@x.com", PW, "ip", require_two_step=lambda org: org == "acme")
     assert r.kind == "session" and r.user.limited and acc.session(r.token).limited
+    other = acc.login("a@x.com", PW, "ip2", require_two_step=lambda org: org == "acme")  # another limited session
     secret = acc.start_two_step("a@x.com")
-    acc.confirm_two_step("a@x.com", totp.code_at(secret, int(time.time() // 30)))
-    assert not acc.session(r.token).limited
+    acc.confirm_two_step("a@x.com", totp.code_at(secret, int(time.time() // 30)), r.token)
+    assert not acc.session(r.token).limited  # the session that proved the code
+    assert acc.session(other.token) is None  # every other password-only session is ended
 
 
 # --- through the server --------------------------------------------------------------
@@ -127,6 +129,9 @@ def test_web_flow_end_to_end(world):  # noqa: F811
         assert a.login("approver@acme.com")[0] == 200
         assert a.req("GET", "/api/web/me")[1]["setup_required"] is True
         assert a.req("GET", "/api/web/tickets")[0] == 403
+        # A password-only session can't change the password either: that would let someone with a stolen password
+        # lock the owner out before two-step is set up.
+        assert a.req("POST", "/api/web/password", {"current": PW, "new": "another-long-password-1"})[0] == 403
         # A fresh sign-in for the admin now needs the code.
         b = Client("127.0.0.1", srv.server_address[1])
         status, body, r = b.login("admin@acme.com")

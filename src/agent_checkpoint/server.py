@@ -459,7 +459,7 @@ def make_server(registry: Registry, host: str = "127.0.0.1", port: int = 8077, c
                 accounts.logout(self._cookie())
                 return self._json(200, {"signed_out": True}, self._set_cookie("", 0))
 
-            user = self._user(allow_limited=route in ("me", "two-step/start", "two-step/confirm", "password"))
+            user = self._user(allow_limited=route in ("me", "two-step/start", "two-step/confirm"))
             gw = registry.gateway(user.org_id)
             if route == "me" and m == "GET":
                 return self._json(200, {"email": user.email, "role": user.role, "company": gw.org.name,
@@ -480,7 +480,7 @@ def make_server(registry: Registry, host: str = "127.0.0.1", port: int = 8077, c
                 b = self._body({"code"})
                 if not isinstance(b.get("code"), str) or len(b["code"]) > 20:
                     raise HTTPError(422, "Enter the 6-digit code from your authenticator app.")
-                codes = accounts.confirm_two_step(user.email, b["code"])
+                codes = accounts.confirm_two_step(user.email, b["code"], self._cookie())
                 gw.org.ledger.append("account", "-", {"by": user.email, "event": "two-step sign-in turned on"})
                 return self._json(200, {"recovery_codes": codes})
             if route == "two-step/disable" and m == "POST":

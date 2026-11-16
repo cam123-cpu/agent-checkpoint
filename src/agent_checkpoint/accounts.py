@@ -334,7 +334,7 @@ class Accounts:
                 (self.crypto.encrypt(secret, f"users.totp_pending:{email}"), email))
         return secret
 
-    def confirm_two_step(self, email: str, code: str) -> list[str]:
+    def confirm_two_step(self, email: str, code: str, current_token: str = "") -> list[str]:
         rows = self._q("SELECT totp_pending_enc FROM users WHERE email = ?", (email,))
         if not rows or not rows[0][0]:
             raise AuthError(409, "Start setting up two-step sign-in first.")
@@ -348,7 +348,11 @@ class Accounts:
         self._q("DELETE FROM recovery_codes WHERE email = ?", (email,))
         for c in codes:
             self._q("INSERT INTO recovery_codes VALUES (?, ?)", (email, self._recovery_hash(email, c)))
-        self._q("UPDATE sessions SET limited = 0 WHERE email = ?", (email,))
+        # Only the session that proved the code becomes a full session. Any other session (a password-only sign-in
+        # someone else may hold) is ended: they'd have to sign in again, now with a code.
+        keep = self._h(current_token) if current_token else ""
+        self._q("DELETE FROM sessions WHERE email = ? AND token_hash != ?", (email, keep))
+        self._q("UPDATE sessions SET limited = 0 WHERE email = ? AND token_hash = ?", (email, keep))
         return codes
 
     def disable_two_step(self, email: str, password: str, code: str) -> None:
