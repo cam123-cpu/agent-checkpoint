@@ -327,6 +327,12 @@ def check_duplicate(req, ctx):
     prior = ctx.store.payments(req.vendor_id, "pay")
     for p in prior:
         if key and p.invoice_key == key:
+            if ctx.actor == "run" and p.amount_cents != req.amount_cents and not p.request_id.startswith("run-L"):
+                # Real books pay invoices in parts. The same number for a different amount is worth a look,
+                # not an automatic stop; the same number for the same amount is a duplicate.
+                return [Finding("repeat_invoice", P, f"Invoice {req.invoice_number} was already paid on "
+                                                     f"{p.on.isoformat()} ({money(p.amount_cents)}). This line is "
+                                                     f"{money(req.amount_cents)}: an instalment, or a duplicate?", 0.5)]
             if p.request_id.startswith("run-L"):
                 return [Finding("duplicate_payment", B, f"Invoice {req.invoice_number} is also on line "
                                                         f"{p.request_id[5:]} of this payment run", 0.95)]
@@ -363,8 +369,13 @@ def check_split(req, ctx):
     lim = ctx.policy.approval_limit_cents
     if req.action != "pay" or req.amount_cents >= lim:
         return []
+    # In a payment file, a vendor with many small bills a week is normal. Only parts that are each a large
+    # share of the limit look like one bill cut up to stay under it.
+    floor = int(lim * 0.4) if ctx.actor == "run" else 0
+    if req.amount_cents < floor:
+        return []
     window = [p for p in ctx.store.payments(req.vendor_id, "pay")
-              if abs((req.on - p.on).days) <= ctx.policy.split_window_days and p.amount_cents < lim]
+              if abs((req.on - p.on).days) <= ctx.policy.split_window_days and floor <= p.amount_cents < lim]
     total = sum(p.amount_cents for p in window) + req.amount_cents
     if window and total >= lim:
         return [Finding("split_payment", P, f"{len(window) + 1} payments to this vendor within "

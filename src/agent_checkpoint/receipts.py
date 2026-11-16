@@ -55,6 +55,10 @@ class Signer:
         with os.fdopen(fd, "wb") as f:
             f.write(pem)
 
+    def sign_bytes(self, data: bytes) -> bytes:
+        """For signed documents (release.py) that carry their own signing context."""
+        return self._key.sign(data)
+
     def public_pem(self) -> str:
         return self._key.public_key().public_bytes(serialization.Encoding.PEM,
                                                    serialization.PublicFormat.SubjectPublicKeyInfo).decode()

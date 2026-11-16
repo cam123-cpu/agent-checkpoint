@@ -33,6 +33,8 @@ from .notify import Notifier
 from .policy import Policy
 from .rails import Rail
 from .receipts import ReceiptError, Signer
+from .release import account_tag
+from .release import sign as sign_doc
 from .store import Payment, Store, last4, norm_account, norm_invoice
 
 
@@ -82,6 +84,16 @@ def masked_request(req: dict, crypto) -> dict:
         if e.get("excerpt"):
             e["excerpt"] = _ACCOUNTISH.sub(lambda m: f"[account {last4(m.group(0))}]", e["excerpt"])
     return d
+
+
+def pilot_measure(summary: dict, limit_pct: float) -> dict:
+    """The number that decides a pilot: how much of an ordinary file was held. Over the limit, people stop
+    working the queue, and the checks don't fit their books."""
+    total = sum(v["count"] for v in summary.values())
+    held = summary["pause"]["count"] + summary["block"]["count"]
+    pct = round(100 * held / total, 1) if total else 0.0
+    return {"lines": total, "not_ready": held, "not_ready_pct": pct, "limit_pct": limit_pct,
+            "over_limit": pct > limit_pct}
 
 
 def _digits(phone: str) -> str:
@@ -188,6 +200,9 @@ class Gateway:
                     raw["po_number"] = row["po_number"]
                 if row.get("bank_account"):
                     raw["bank_account_on_invoice"] = row["bank_account"]
+                # No currency column: the file is in the company's currency. A column names it per line, and an
+                # amount in another currency is never converted: it's held.
+                raw["currency"] = row.get("currency") or org.policy.currency
                 try:
                     req = ActionRequest.from_dict(raw, agent_id="payment-run", on=now.date())
                 except ValueError as exc:
@@ -195,6 +210,12 @@ class Gateway:
                     continue
                 ctx = Context(org.store, org.policy, now, org.intel, org.org_id, weights=weights, actor="run")
                 verdict, risk, findings = evaluate(req, ctx)
+                if row.get("invoice_missing"):
+                    findings = list(findings) + [Finding("no_invoice_number", Verdict.PAUSE,
+                                                         "No invoice number on this line, so a duplicate can't be "
+                                                         "caught. Add it, or check by hand.", 0.4)]
+                    if verdict is Verdict.GO:
+                        verdict = Verdict.PAUSE
                 results.append({**_run_row(row), "verdict": verdict.value, "risk": risk,
                                 "reasons": [f.message for f in sorted(findings, key=lambda f: -RANK[f.verdict])]})
                 if verdict is not Verdict.BLOCK:
@@ -208,12 +229,117 @@ class Gateway:
                    for v in ("go", "pause", "block")}
         order = {"block": 0, "pause": 1, "go": 2}
         shown = sorted(results, key=lambda r: (order[r["verdict"]], -r["risk"], r["line"]))
-        org.ledger.append("payment_run_checked", "-", {
-            "by": person, "file_sha256": file_sha256, "rows": len(rows), "summary": summary,
+        pilot = pilot_measure(summary, org.policy.pilot_hold_limit_pct)
+        run_id = f"run-{now.strftime('%Y%m%dT%H%M%S')}-{file_sha256[:10]}"
+        org.ledger.append("payment_run_checked", run_id, {
+            "run_id": run_id, "by": person, "checked_at": now.isoformat(), "file_sha256": file_sha256,
+            "rows": len(rows), "summary": summary,
+            "not_ready_pct": pilot["not_ready_pct"],
             "lines": [{k: r[k] for k in ("line", "vendor_id", "vendor_name", "invoice_number", "amount_cents",
                                          "account_in_file", "verdict", "risk", "reasons")} for r in shown],
         })
-        return {"rows": shown, "summary": summary}
+        return {"run_id": run_id, "rows": shown, "summary": summary, "pilot": pilot}
+
+    # --- in the path: documents a payment system can check -------------------------------
+
+    def release_run(self, run_id: str, person: str) -> dict:
+        """Sign which lines of a checked payment file may be released, and where each may go.
+
+        Only lines that were Ready are released. The file is named by its SHA-256, so a changed file has no
+        release. A release is issued at most once per run and expires after policy.release_hours.
+        """
+        org, now = self.org, self.clock()
+        if person not in org.policy.approvers:
+            raise CheckpointError(403, "only approvers can release a payment file")
+        run = org.ledger.find(run_id, "payment_run_checked")
+        if run is None:
+            raise CheckpointError(404, "no such payment run")
+        if org.ledger.find(run_id, "release_issued"):
+            raise CheckpointError(409, "this payment run was already released. Check the file again for a new one.")
+        checked_at = datetime.fromisoformat(run["checked_at"])
+        if now - checked_at > timedelta(hours=org.policy.release_hours):
+            raise CheckpointError(409, f"this check is more than {org.policy.release_hours} hours old. Check the "
+                                       "file again: the books may have changed.")
+        salt = uuid.uuid4().hex
+        release, hold = [], []
+        for line in sorted(run["lines"], key=lambda r: r["line"]):
+            vendor = org.store.vendor(line["vendor_id"])
+            if line["verdict"] != "go" or vendor is None:
+                hold.append(line["line"])
+                continue
+            release.append({"line": line["line"], "vendor_id": line["vendor_id"], "invoice_number": line["invoice_number"],
+                            "amount_cents": line["amount_cents"], "account_tag": account_tag(salt, vendor.bank_account),
+                            "account_last4": last4(vendor.bank_account)})
+        body = {"release_id": "RL-" + uuid.uuid4().hex, "org_id": org.org_id, "company": org.name, "run_id": run_id,
+                "file_sha256": run["file_sha256"], "checked_at": checked_at.isoformat(), "issued_at": now.isoformat(),
+                "expires_at": (now + timedelta(hours=org.policy.release_hours)).isoformat(), "issued_by": person,
+                "currency": org.policy.currency, "salt": salt, "release": release, "hold": hold,
+                "released_cents": sum(r["amount_cents"] for r in release),
+                "held_cents": sum(r["amount_cents"] for r in run["lines"] if r["line"] in set(hold))}
+        doc = sign_doc(org.signer, "release", body)
+        org.ledger.append("release_issued", run_id, {
+            "release_id": body["release_id"], "by": person, "file_sha256": body["file_sha256"],
+            "released": len(release), "released_cents": body["released_cents"], "held": len(hold),
+            "held_cents": body["held_cents"], "doc_sha256": doc["sha256"]})
+        return doc
+
+    def allowed_accounts(self, person: str) -> dict:
+        """The locked list of where this company pays, signed, for a bank or payment system to check against.
+
+        Every account on it was set by an import before go-live or by a bank change that a second person
+        approved after calling the number on file. Versions only go up; a partner keeps the newest it has seen.
+        """
+        org, now = self.org, self.clock()
+        if person not in org.policy.approvers:
+            raise CheckpointError(403, "only approvers can issue the allowed-accounts list")
+        version = len(org.ledger.entries("allowed_accounts_issued")) + 1
+        salt = uuid.uuid4().hex
+        accounts = [{"vendor_id": v.vendor_id, "vendor_name": v.name, "account_tag": account_tag(salt, v.bank_account),
+                     "account_last4": last4(v.bank_account)} for v in org.store.vendors() if norm_account(v.bank_account)]
+        body = {"list_id": f"AL-{org.org_id}-{version}", "org_id": org.org_id, "company": org.name, "version": version,
+                "issued_at": now.isoformat(), "issued_by": person,
+                "expires_at": (now + timedelta(days=org.policy.allowed_list_days)).isoformat(),
+                "salt": salt, "accounts": accounts}
+        doc = sign_doc(org.signer, "allowed_accounts", body)
+        org.ledger.append("allowed_accounts_issued", body["list_id"], {
+            "version": version, "by": person, "accounts": len(accounts), "doc_sha256": doc["sha256"]})
+        return doc
+
+    # --- outcomes: what actually happened, for the miss rate -----------------------------
+
+    OUTCOMES = ("fraud", "error", "fine")
+
+    def mark_line(self, run_id: str, line: int, outcome: str, person: str, note: str = "") -> dict:
+        """After the fact: was a held line really fraud, a real mistake (duplicate, wrong amount), or fine?"""
+        if outcome not in self.OUTCOMES:
+            raise CheckpointError(422, "outcome must be fraud, error or fine")
+        run = self.org.ledger.find(run_id, "payment_run_checked")
+        if run is None:
+            raise CheckpointError(404, "no such payment run")
+        match = [r for r in run["lines"] if r["line"] == line]
+        if not match:
+            raise CheckpointError(404, f"line {line} is not in that payment run")
+        entry = {"run_id": run_id, "line": line, "verdict": match[0]["verdict"], "outcome": outcome,
+                 "amount_cents": match[0]["amount_cents"], "by": person, "note": note[:500]}
+        self.org.ledger.append("line_outcome", run_id, entry)
+        return entry
+
+    def report_miss(self, person: str, amount_cents: int, vendor_id: str = "", run_id: str = "", line: int = 0,
+                    note: str = "") -> dict:
+        """Money that was lost or nearly lost and the checkpoint said Ready, or never saw. This is the number an
+        insurer asks for first; it only means something if misses are recorded as faithfully as catches."""
+        if amount_cents <= 0:
+            raise CheckpointError(422, "amount must be positive")
+        verdict = ""
+        if run_id:
+            run = self.org.ledger.find(run_id, "payment_run_checked")
+            if run is None:
+                raise CheckpointError(404, "no such payment run")
+            verdict = next((r["verdict"] for r in run["lines"] if r["line"] == line), "")
+        entry = {"by": person, "amount_cents": amount_cents, "vendor_id": vendor_id[:64], "run_id": run_id,
+                 "line": line, "verdict_given": verdict or "not checked", "note": note[:500]}
+        self.org.ledger.append("miss_reported", run_id or "-", entry)
+        return entry
 
     def status(self, request_id: str, agent_id: str | None = None) -> dict:
         previous = self.org.ledger.find(request_id, "decision")

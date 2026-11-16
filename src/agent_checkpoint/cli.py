@@ -21,6 +21,7 @@ Home folder: --home, or CHECKPOINT_HOME, or ./checkpoint-data.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import secrets
@@ -30,7 +31,7 @@ from datetime import date
 
 from .accounts import AuthError
 from .gateway import CheckpointError
-from .importers import import_history, import_pos, import_vendors
+from .importers import import_history, import_pos, import_vendors, read_payment_run
 from .models import parse_amount
 from .policy import AgentScope
 from .report import render_text, shadow_report
@@ -226,6 +227,116 @@ def cmd_resolve(args, approve: bool) -> int:
     return 0
 
 
+def _write_out(path: str, doc: dict) -> None:
+    text = json.dumps(doc, indent=2)
+    if path in ("", "-"):
+        print(text)
+    else:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text + "\n")
+        print(f"wrote {path}", file=sys.stderr)
+
+
+def cmd_check_run(args) -> int:
+    gw = _registry(args).gateway(args.org)
+    with open(args.file, "rb") as f:
+        raw = f.read()
+    text = raw.decode("utf-8-sig")
+    rows, errors = read_payment_run(gw.org.store, text)
+    out = gw.check_run(rows, args.as_, hashlib.sha256(text.encode()).hexdigest())
+    p = out["pilot"]
+    names = {"go": "Ready", "pause": "Review", "block": "Don't pay"}
+    for r in out["rows"]:
+        print(f"line {r['line']:>4}  {names[r['verdict']]:<9}  {r['vendor_name'][:30]:<30} {r['amount_cents'] / 100:>12,.2f}  "
+              + "; ".join(r["reasons"][:2]))
+    print(f"\n{out['run_id']}: {p['not_ready']} of {p['lines']} lines not ready ({p['not_ready_pct']}%)."
+          + (f" Over the {p['limit_pct']}% limit: the checks don't fit these books yet." if p["over_limit"] else ""))
+    for e in errors[:20]:
+        print("  " + e, file=sys.stderr)
+    return 0
+
+
+def cmd_release(args) -> int:
+    _write_out(args.out, _registry(args).gateway(args.org).release_run(args.run, args.as_))
+    return 0
+
+
+def cmd_allowed_accounts(args) -> int:
+    _write_out(args.out, _registry(args).gateway(args.org).allowed_accounts(args.as_))
+    return 0
+
+
+def cmd_verify_release(args) -> int:
+    """What a bank or payment system runs. Needs only the file, the release, and the company's public key."""
+    from datetime import UTC, datetime
+
+    from .release import ReleaseError, check_allowed, check_release, instructions_from_csv, verify
+    with open(args.public_key, encoding="utf-8") as f:
+        pub = f.read()
+    with open(args.document, encoding="utf-8") as f:
+        doc = json.load(f)
+    try:
+        if doc.get("kind") == "allowed_accounts":
+            body = verify(pub, doc, "allowed_accounts", datetime.now(UTC))
+            if not args.instructions:
+                raise ReleaseError("an allowed-accounts list is checked against --instructions (amount, account)")
+            with open(args.instructions, encoding="utf-8-sig") as f:
+                out = check_allowed(body, instructions_from_csv(f.read()), args.min_version)
+        else:
+            body = verify(pub, doc, "release", datetime.now(UTC))
+            data = None
+            if args.file:
+                with open(args.file, "rb") as f:
+                    data = f.read().decode("utf-8-sig").encode()
+            ins = None
+            if args.instructions:
+                with open(args.instructions, encoding="utf-8-sig") as f:
+                    ins = instructions_from_csv(f.read())
+            used = set()
+            if args.used and os.path.exists(args.used):
+                with open(args.used, encoding="utf-8") as f:
+                    used = {line.strip() for line in f if line.strip()}
+            out = check_release(body, data, ins, used)
+            if out["ok"] and args.used:
+                with open(args.used, "a", encoding="utf-8") as f:
+                    f.write(body["release_id"] + "\n")
+    except ReleaseError as exc:
+        print("REFUSE: " + str(exc))
+        return 1
+    print(json.dumps(out, indent=2))
+    return 0 if out["ok"] else 1
+
+
+def cmd_mark_line(args) -> int:
+    print(json.dumps(_registry(args).gateway(args.org).mark_line(args.run, args.line, args.outcome, args.as_,
+                                                                  args.note), indent=2))
+    return 0
+
+
+def cmd_report_miss(args) -> int:
+    gw = _registry(args).gateway(args.org)
+    print(json.dumps(gw.report_miss(args.as_, parse_amount(args.amount), args.vendor, args.run, args.line, args.note),
+                     indent=2))
+    return 0
+
+
+def cmd_evidence(args) -> int:
+    from .evidence import evidence, render_evidence, usage
+    gw = _registry(args).gateway(args.org)
+    ev = evidence(gw.org.ledger, args.since or "", args.until or "", gw.org.policy.pilot_hold_limit_pct)
+    if args.json:
+        print(json.dumps({**ev, "usage": usage(gw.org.ledger, args.since or "", args.until or "")}, indent=2))
+    else:
+        print(render_evidence(gw.org.name, ev))
+    return 0
+
+
+def cmd_usage(args) -> int:
+    from .evidence import usage
+    print(json.dumps(usage(_registry(args).gateway(args.org).org.ledger, args.since or "", args.until or ""), indent=2))
+    return 0
+
+
 def cmd_move_keys(args) -> int:
     for path in _registry(args).move_secrets():
         print("moved", path)
@@ -329,6 +440,35 @@ def build_parser() -> argparse.ArgumentParser:
         else:
             s.add_argument("--fraud", action="store_true", help="report to the shared fraud network")
         s.set_defaults(fn=lambda a, ap=approve: cmd_resolve(a, ap))
+    s = sub.add_parser("check-run", help="check a payment file before it is released; nothing is paid")
+    s.add_argument("org"); s.add_argument("file"); s.add_argument("--as", dest="as_", required=True)
+    s.set_defaults(fn=cmd_check_run)
+    s = sub.add_parser("release", help="sign which lines of a checked payment file may be released")
+    s.add_argument("org"); s.add_argument("run"); s.add_argument("--as", dest="as_", required=True)
+    s.add_argument("--out", default="-"); s.set_defaults(fn=cmd_release)
+    s = sub.add_parser("allowed-accounts", help="sign the locked list of vendor accounts, for a bank to check")
+    s.add_argument("org"); s.add_argument("--as", dest="as_", required=True); s.add_argument("--out", default="-")
+    s.set_defaults(fn=cmd_allowed_accounts)
+    s = sub.add_parser("verify-release", help="partner side: check a release or allowed-accounts list (no data folder)")
+    s.add_argument("document"); s.add_argument("--public-key", required=True)
+    s.add_argument("--file", help="the payment file that was checked"); s.add_argument("--instructions",
+                   help="CSV of what will be sent: amount, account[, vendor_id]")
+    s.add_argument("--used", help="file of release ids already used (appended on success)")
+    s.add_argument("--min-version", type=int, default=0, help="newest allowed-accounts version already seen")
+    s.set_defaults(fn=cmd_verify_release)
+    s = sub.add_parser("mark-line", help="record what a line really was: fraud, error or fine")
+    s.add_argument("org"); s.add_argument("run"); s.add_argument("line", type=int)
+    s.add_argument("outcome", choices=["fraud", "error", "fine"]); s.add_argument("--as", dest="as_", required=True)
+    s.add_argument("--note", default=""); s.set_defaults(fn=cmd_mark_line)
+    s = sub.add_parser("report-miss", help="fraud that got through: the checkpoint said Ready, or never saw it")
+    s.add_argument("org"); s.add_argument("amount"); s.add_argument("--as", dest="as_", required=True)
+    s.add_argument("--vendor", default=""); s.add_argument("--run", default=""); s.add_argument("--line", type=int, default=0)
+    s.add_argument("--note", default=""); s.set_defaults(fn=cmd_report_miss)
+    for name, fn in (("evidence", cmd_evidence), ("usage", cmd_usage)):
+        s = sub.add_parser(name); s.add_argument("org"); s.add_argument("--since"); s.add_argument("--until")
+        if name == "evidence":
+            s.add_argument("--json", action="store_true")
+        s.set_defaults(fn=fn)
     sub.add_parser("move-keys", help="move every secret out of the data folder into --keys").set_defaults(fn=cmd_move_keys)
     sub.add_parser("doctor", help="checks before a pilot: keys, mode, ledger").set_defaults(fn=cmd_doctor)
     s = sub.add_parser("withdraw-report", help="take back your company's fraud report for a request")

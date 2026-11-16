@@ -46,6 +46,7 @@ FIELDS = {
                        "bill no", "reference", "ref", "document number", "num", "no"],
     "paid_on": ["paid on", "paid_on", "payment date", "date paid", "paid date", "date", "value date"],
     "po_number": ["po number", "po_number", "po", "purchase order"],
+    "currency": ["currency", "currency code", "ccy", "cur", "curr"],
 }
 
 
@@ -265,7 +266,8 @@ def read_payment_run(store: Store, text: str) -> tuple[list[dict], list[str]]:
     """The bills about to be paid, as rows the checkpoint can check. Unknown vendors are kept (they're a finding)."""
     rows, errors = [], []
     by_id, by_exact, by_norm = _vendor_indexes(store.vendors())
-    for n, r in _records(text, ["amount"], ["vendor_id", "name", "invoice_number", "bank_account", "po_number"]):
+    for n, r in _records(text, ["amount"], ["vendor_id", "name", "invoice_number", "bank_account", "po_number",
+                                            "currency"]):
         try:
             key = (r.get("vendor_id") or r.get("name") or "").strip()
             if not key:
@@ -273,8 +275,10 @@ def read_payment_run(store: Store, text: str) -> tuple[list[dict], list[str]]:
             v = _match_vendor(by_id, by_exact, by_norm, r)
             rows.append({"line": n, "vendor_id": v.vendor_id if v else key[:64], "vendor_name": v.name if v else key[:200],
                          "invoice_number": (r.get("invoice_number") or "").strip()[:64] or f"line {n}",
+                         "invoice_missing": not (r.get("invoice_number") or "").strip(),
                          "amount_cents": parse_amount(r["amount"]), "bank_account": (r.get("bank_account") or "")[:64],
-                         "po_number": (r.get("po_number") or "")[:64]})
+                         "po_number": (r.get("po_number") or "")[:64],
+                         "currency": (r.get("currency") or "").strip().upper()[:3]})
         except ValueError as exc:
             errors.append(f"line {n}: {exc}")
     return rows, errors
