@@ -135,7 +135,7 @@ def vendors(gw) -> list[dict]:
         paid[p.vendor_id] += p.amount_cents
         count[p.vendor_id] += 1
     return [{"vendor_id": v.vendor_id, "name": v.name, "account_on_file": last4(v.bank_account),
-             "email_domains": list(v.email_domains),
+             "email_domains": list(v.email_domains), "phone": v.phone,
              "bank_changed_on": v.bank_changed_on.isoformat() if v.bank_changed_on else "",
              "payments": count[v.vendor_id], "paid_cents": paid[v.vendor_id]} for v in gw.org.store.vendors()]
 
@@ -147,6 +147,7 @@ def settings(gw, users: list[dict]) -> dict:
         "dual_approval_cents": p.dual_approval_cents, "recent_bank_change_days": p.recent_bank_change_days,
         "ticket_hours": p.ticket_hours, "require_two_step": p.require_two_step,
         "agents": [{"agent_id": a, "made_by": s.vendor, "allowed_actions": list(s.allowed_actions),
+                    "connected": True,
                     "max_amount_cents": s.max_amount_cents, "daily_cap_cents": s.daily_cap_cents}
                    for a, s in sorted(p.agents.items())],
         "users": users,
@@ -169,3 +170,51 @@ def activity_csv(gw) -> str:
                                        r["status"], "; ".join(r["reasons"]), r["request_id"])])
     return buf.getvalue()
 
+
+
+def _n(n: int, one: str, many: str) -> str:
+    return f"{n} {one if n == 1 else many}"
+
+
+def setup(gw, users: list[dict], agent_keys: dict[str, int]) -> dict:
+    """What a company has connected, and what the checks still need to work well."""
+    store, p = gw.org.store, gw.org.policy
+    c = store.counts()
+    vendors = store.vendors()
+    no_domain = [v.name for v in vendors if not v.email_domains]
+    no_phone = [v.name for v in vendors if not v.phone]
+    approvers = [u for u in users if u["role"] in ("admin", "approver") and not u["disabled"]]
+    live_agents = [a for a in p.agents if agent_keys.get(a)]
+    steps = [
+        {"id": "vendors", "done": c["vendors"] > 0, "title": "Import your vendor list",
+         "detail": f"{c['vendors']} vendors" if c["vendors"] else
+         "Who you pay, their bank accounts, email domains and phone numbers."},
+        {"id": "pos", "done": c["pos"] > 0, "title": "Import open purchase orders",
+         "detail": f"{c['pos']} purchase orders" if c["pos"] else "So amounts can be matched to what was ordered."},
+        {"id": "history", "done": c["history"] > 0, "title": "Import past payments",
+         "detail": f"{c['history']} past payments" if c["history"] else
+         "6 to 12 months, so duplicates and unusual amounts are caught from day one."},
+        {"id": "people", "done": len(approvers) >= 2, "title": "Add at least two approvers",
+         "detail": f"{len(approvers)} can approve" + ("" if len(approvers) >= 2 else ". Large payments need two different "
+                                                       "people, and nobody can approve their own request.")},
+        {"id": "two_step", "done": p.require_two_step, "title": "Require two-step sign-in",
+         "detail": "Required" if p.require_two_step else "So a stolen password alone can't approve a payment."},
+        {"id": "agents", "done": bool(live_agents), "title": "Connect an agent, or check a payment run",
+         "detail": f"{len(live_agents)} agents connected" if live_agents else
+         "No agents yet? Upload the bills you're about to pay on the Payment run page."},
+        {"id": "enforce", "done": p.mode == "enforce", "title": "Switch to enforce",
+         "detail": "Enforcing" if p.mode == "enforce" else "After a few weeks of the watch-only report, when you trust it."},
+    ]
+    health = []
+    if no_domain:
+        health.append({"level": "warn", "text": f"{_n(len(no_domain), 'vendor has', 'vendors have')} no email domain, "
+                       "so emails claiming to be "
+                       f"from them can't be checked: {', '.join(no_domain[:5])}{'...' if len(no_domain) > 5 else ''}"})
+    if no_phone:
+        health.append({"level": "warn", "text": f"{_n(len(no_phone), 'vendor has', 'vendors have')} no phone number "
+                       "on file for confirming "
+                       f"bank changes: {', '.join(no_phone[:5])}{'...' if len(no_phone) > 5 else ''}"})
+    if c["vendors"]:
+        health.append({"level": "info", "text": f"{c['vendors_with_history']} of {c['vendors']} vendors have enough "
+                       "payment history (8 or more) for the unusual-amount check."})
+    return {"steps": steps, "done": sum(s["done"] for s in steps), "health": health, "counts": c}

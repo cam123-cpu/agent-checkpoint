@@ -28,7 +28,7 @@ from datetime import UTC, datetime, timedelta
 from .checks import Context, _sender_strings, domain_of, evaluate, learned_weights
 from .intel import Intel
 from .ledger import Ledger
-from .models import ActionRequest, Decision, Finding, Verdict, money
+from .models import RANK, ActionRequest, Decision, Finding, Verdict, money
 from .notify import Notifier
 from .policy import Policy
 from .rails import Rail
@@ -84,6 +84,12 @@ def masked_request(req: dict, crypto) -> dict:
     return d
 
 
+def _run_row(row: dict) -> dict:
+    return {"line": row["line"], "vendor_id": row["vendor_id"], "vendor_name": row["vendor_name"],
+            "invoice_number": row["invoice_number"], "amount_cents": row["amount_cents"],
+            "account_in_file": last4(row["bank_account"]) if row.get("bank_account") else ""}
+
+
 def _findings_from(rows) -> tuple[Finding, ...]:
     return tuple(Finding(f["check"], Verdict(f["verdict"]), f["message"], f.get("weight", 0.0)) for f in rows)
 
@@ -95,7 +101,7 @@ class Gateway:
 
     # --- agents -----------------------------------------------------------------------
 
-    def submit(self, raw: dict, *, agent_id: str) -> Decision:
+    def submit(self, raw: dict, *, agent_id: str, actor: str = "agent") -> Decision:
         org, start, now = self.org, time.perf_counter(), self.clock()
         try:
             req = ActionRequest.from_dict(raw, agent_id=agent_id, on=now.date())
@@ -115,7 +121,7 @@ class Gateway:
 
             org.store.note_activity(agent_id, now)
             ctx = Context(
-                store=org.store, policy=org.policy, now=now, intel=org.intel, org_id=org.org_id,
+                store=org.store, policy=org.policy, now=now, intel=org.intel, org_id=org.org_id, actor=actor,
                 spent_today_cents=org.store.spent_on(agent_id, req.on),
                 recent_actions=org.store.activity_since(agent_id, now - timedelta(minutes=1)) - 1,
                 weights=learned_weights(org.store.tickets("approved") + org.store.tickets("rejected")),
@@ -144,6 +150,59 @@ class Gateway:
         if notify:
             org.notifier.send(*notify, org.policy.approvers)
         return d
+
+    # --- people (web app) -------------------------------------------------------------
+
+    def submit_person(self, raw: dict, person: str) -> Decision:
+        """A request made by a signed-in person (for example a bank change after a vendor phoned). Same checks as
+        an agent's, except agent limits; it always needs a *different* person to approve (the requester rule)."""
+        raw = {**raw, "instructed_by": {"source": "human", "identity": person}}
+        return self.submit(raw, agent_id="person:" + person, actor="person")
+
+    # --- payment runs -----------------------------------------------------------------
+
+    def check_run(self, rows: list[dict], person: str, file_sha256: str) -> dict:
+        """Check a list of bills about to be paid, without paying or changing anything.
+
+        Every row goes through the same checks as an agent's payment. Rows are checked in order inside a
+        transaction that is always rolled back: each row that would be paid is recorded *temporarily*, so a
+        later row in the same file is seen as a duplicate or a split, and then nothing is kept.
+        """
+        org, now = self.org, self.clock()
+        results = []
+        weights = learned_weights(org.store.tickets("approved") + org.store.tickets("rejected"))
+        with org.store.scratch():
+            for row in rows:
+                raw = {"request_id": f"run-L{row['line']}", "action": "pay", "vendor_id": row["vendor_id"],
+                       "amount_cents": row["amount_cents"], "invoice_number": row["invoice_number"],
+                       "evidence": [{"kind": "invoice", "ref": f"payment run line {row['line']}"}],
+                       "instructed_by": {"source": "human", "identity": person}}
+                if row.get("po_number"):
+                    raw["po_number"] = row["po_number"]
+                if row.get("bank_account"):
+                    raw["bank_account_on_invoice"] = row["bank_account"]
+                try:
+                    req = ActionRequest.from_dict(raw, agent_id="payment-run", on=now.date())
+                except ValueError as exc:
+                    results.append({**_run_row(row), "verdict": "block", "risk": 100, "reasons": [str(exc)]})
+                    continue
+                ctx = Context(org.store, org.policy, now, org.intel, org.org_id, weights=weights, actor="run")
+                verdict, risk, findings = evaluate(req, ctx)
+                results.append({**_run_row(row), "verdict": verdict.value, "risk": risk,
+                                "reasons": [f.message for f in sorted(findings, key=lambda f: -RANK[f.verdict])]})
+                if verdict is not Verdict.BLOCK:
+                    vendor = org.store.vendor(req.vendor_id)
+                    org.store.record_payment(Payment(req.request_id, "payment-run", req.vendor_id,
+                                                     norm_invoice(req.invoice_number), req.amount_cents,
+                                                     norm_account(vendor.bank_account if vendor else ""), req.on, "pay",
+                                                     "observed"), po_number=req.po_number)
+        summary = {v: {"count": sum(r["verdict"] == v for r in results),
+                       "amount_cents": sum(r["amount_cents"] for r in results if r["verdict"] == v)}
+                   for v in ("go", "pause", "block")}
+        org.ledger.append("payment_run_checked", "-", {"by": person, "file_sha256": file_sha256, "rows": len(rows),
+                                                       "summary": summary})
+        order = {"block": 0, "pause": 1, "go": 2}
+        return {"rows": sorted(results, key=lambda r: (order[r["verdict"]], -r["risk"], r["line"])), "summary": summary}
 
     def status(self, request_id: str, agent_id: str | None = None) -> dict:
         previous = self.org.ledger.find(request_id, "decision")
@@ -210,7 +269,8 @@ class Gateway:
             if status == "approved":
                 # Re-check: anything that changed since the pause and now blocks wins.
                 ctx = Context(org.store, org.policy, now, org.intel, org.org_id,
-                              org.store.spent_on(req.agent_id, now.date()))
+                              org.store.spent_on(req.agent_id, now.date()),
+                              actor="person" if req.agent_id.startswith("person:") else "agent")
                 verdict, _, findings = evaluate(req, ctx)
                 new_blocks = [f for f in findings if f.verdict is Verdict.BLOCK]
                 if t.get("payee_fp") and t["payee_fp"] != self._payee_fp(req):

@@ -109,7 +109,7 @@ def test_auditor_sees_but_cannot_decide(site, browser):
 def test_phone_layout_and_pages(site, browser):
     base, _ = site
     page, problems = sign_in(browser, base, "admin@acme.com", {"width": 375, "height": 740})
-    for route in ("approvals", "overview", "activity", "audit-log", "vendors", "company-settings"):
+    for route in ("approvals", "overview", "activity", "audit-log", "vendors", "setup"):
         page.goto(f"{base}/#{route}")
         page.wait_for_selector("#main h1")
         assert not page.evaluate("document.documentElement.scrollWidth > window.innerWidth"), route
@@ -145,4 +145,25 @@ def test_two_step_setup_and_sign_in_in_the_browser(site, browser):
     page.fill("#code", totp.code_at(key, int(time.time() // 30) + 1))
     page.get_by_role("button", name="Continue").click()
     page.wait_for_selector(".slip")
+    assert problems == []
+
+
+def test_payment_run_and_setup_in_the_browser(site, browser, tmp_path):
+    base, reg = site
+    page, problems = sign_in(browser, base, "admin@acme.com")
+    csv = tmp_path / "run.csv"
+    csv.write_text("Supplier,Invoice #,Amount,Pay to account\nV1,R-1,100.00,US000210000012345\n"
+                   "V1,R-1,100.00,US000210000012345\nV1,R-2,200.00,GB00ELSEWHERE0001\n")
+    page.goto(base + "/#payment-run")
+    page.set_input_files("#run-file", str(csv))
+    page.get_by_role("button", name="Check this payment run").click()
+    page.wait_for_selector("text=Checked 3 payments")
+    assert page.locator("table.data .verdict.block").count() == 2  # (the summary table has a label too)
+    page.goto(base + "/#setup")
+    page.wait_for_selector("text=Getting started")
+    page.locator("summary", has_text="Connect a new agent").click()
+    page.fill("#ag-name", "browser-agent")
+    page.get_by_role("button", name="Create agent and key").click()
+    page.wait_for_selector("pre.config")
+    assert "CHECKPOINT_AGENT_KEY" in page.locator("pre.config").text_content()
     assert problems == []

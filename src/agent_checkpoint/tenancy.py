@@ -154,6 +154,31 @@ class Registry:
                 self.save_policy(org_id, replace(p, approvers=p.approvers + (user.email,)))
         return user
 
+    def update_agent(self, org_id: str, agent_id: str, scope: AgentScope) -> None:
+        p = self.policy(org_id)
+        if agent_id not in p.agents:
+            raise KeyError(agent_id)
+        self.save_policy(org_id, replace(p, agents={**p.agents, agent_id: scope}))
+
+    def remove_agent(self, org_id: str, agent_id: str) -> int:
+        """Revoke every key the agent has and take it out of the policy. Returns the number of keys revoked."""
+        with self._lock:
+            keys = self._load_keys()
+            gone = [h for h, who in keys.items() if who == {"org": org_id, "kind": "agent", "name": agent_id}]
+            for h in gone:
+                del keys[h]
+            self._save_keys(keys)
+        p = self.policy(org_id)
+        self.save_policy(org_id, replace(p, agents={k: v for k, v in p.agents.items() if k != agent_id}))
+        return len(gone)
+
+    def agent_key_count(self, org_id: str) -> dict[str, int]:
+        out: dict[str, int] = {}
+        for who in self._load_keys().values():
+            if who["org"] == org_id and who["kind"] == "agent":
+                out[who["name"]] = out.get(who["name"], 0) + 1
+        return out
+
     def revoke(self, key: str) -> bool:
         with self._lock:
             keys = self._load_keys()

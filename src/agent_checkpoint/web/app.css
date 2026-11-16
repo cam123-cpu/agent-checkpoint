@@ -216,6 +216,16 @@ table.data .why td { background: var(--paper); color: var(--ink); }
 .demo-banner { background: var(--pause-tint); color: var(--ink); font-size: var(--t-small); }
 .demo-banner p { max-width: 1040px; margin: 0 auto; padding: var(--s2) var(--s4); }
 
+/* ---- setup ---- */
+.checklist { padding-left: var(--s5); display: grid; gap: var(--s3); }
+.checklist li.done strong { color: var(--muted); }
+details.more { border-top: 1px solid var(--rule); padding-top: var(--s4); }
+details.more > summary { cursor: pointer; font-weight: 600; color: var(--action); }
+details.more[open] > summary { margin-bottom: var(--s4); }
+details.more.panel { border-top: 1px solid var(--rule); padding-top: var(--s5); }
+pre.config { font-family: var(--code); font-size: var(--t-small); background: var(--paper); border: 1px solid var(--rule);
+  border-radius: 4px; padding: var(--s3); overflow-x: auto; white-space: pre; }
+
 /* ---- two-step set-up ---- */
 .steps { padding-left: var(--s5); display: grid; gap: var(--s5); margin-bottom: var(--s4); }
 .steps li > * + * { margin-top: var(--s2); }

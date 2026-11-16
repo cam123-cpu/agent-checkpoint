@@ -79,7 +79,18 @@ a phone (add it to the home screen) and on a desktop:
 - **Overview.** What was checked, sent to a person and stopped, with amounts.
 - **Activity.** Every agent action, filterable, with the reasons, and CSV export for auditors.
 - **Audit log.** The integrity check and the fingerprint to hand to your auditor.
-- **Vendors** and **Settings** (limits, mode, agents, people, CSV import for admins).
+- **Payment run.** Upload the bills you're about to pay (CSV from Excel or your accounting system) and get
+  Ready to pay / Review first / Don't pay for each one: duplicates in the file and against past payments,
+  bank accounts that differ from the vendor list, unknown vendors, splits, unusual amounts. Nothing is
+  paid or changed. This works for companies that don't use AI agents yet.
+- **Vendors.** Add and edit vendors; request a bank change (a different person approves it after phoning
+  the vendor on the number on file).
+- **Setup.** A getting-started checklist and data-health warnings; rules; importing your vendor list,
+  purchase orders and **past payments** (so duplicate and unusual-amount checks work from day one);
+  connecting agents (key and MCP config shown once); adding people and roles; two-step and SSO.
+
+Column names in uploads are matched by meaning ("Supplier", "Invoice #", "Payment date" all work), and
+an import can never change an existing vendor's bank account.
 
 ```bash
 agent-checkpoint add-user acme cfo@acme.com --role admin           # prints a password once

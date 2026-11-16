@@ -30,10 +30,14 @@ Security, in the order a request meets it:
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
+import re
+import secrets
 import ssl
 import threading
 import time
+import urllib.parse
 from collections import defaultdict, deque
 from dataclasses import dataclass, replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -43,10 +47,12 @@ from urllib.parse import parse_qs, urlparse
 from . import qr, totp, views
 from .accounts import AuthError
 from .gateway import CheckpointError
-from .importers import import_pos, import_vendors
-from .models import parse_amount
+from .importers import _domains, import_history, import_pos, import_vendors, read_payment_run
+from .models import ACTIONS, parse_amount
 from .oidc import OIDC, SSOConfig, SSOError, new_flow
+from .policy import AgentScope
 from .report import shadow_report
+from .store import PurchaseOrder, Vendor
 from .tenancy import Registry
 
 MAX_JSON = 256 * 1024
@@ -509,25 +515,181 @@ def make_server(registry: Registry, host: str = "127.0.0.1", port: int = 8077, c
                 return self._json(200, self._save_settings(gw, user, self._body(
                     {"mode", "approval_limit", "dual_approval_limit", "recent_bank_change_days", "ticket_hours",
                      "require_two_step"})))
-            if route in ("import/vendors", "import/pos") and m == "POST":
+            if route in ("import/vendors", "import/pos", "import/history") and m == "POST":
                 self._user("admin")
-                if not self.headers.get("Content-Type", "").startswith("text/csv"):
-                    raise HTTPError(415, "upload a .csv file")
-                try:
-                    text = self._read(MAX_CSV).decode("utf-8-sig")
-                except UnicodeDecodeError as exc:
-                    raise HTTPError(422, "the file must be UTF-8 text") from exc
-                if "\x00" in text or text.count("\n") > MAX_CSV_ROWS:
-                    raise HTTPError(422, f"the file must be plain text with at most {MAX_CSV_ROWS} rows")
+                text = self._csv()
                 which = route.split("/")[1]
-                n, errors = (import_vendors if which == "vendors" else import_pos)(gw.org.store, text)
+                try:
+                    if which == "history":
+                        order = qp("date_order", "mdy")
+                        if order not in ("mdy", "dmy"):
+                            raise HTTPError(422, "date_order must be mdy or dmy")
+                        n, already, errors = import_history(gw.org.store, text, order)
+                    else:
+                        already = 0
+                        n, errors = (import_vendors if which == "vendors" else import_pos)(gw.org.store, text)
+                except ValueError as exc:
+                    raise HTTPError(422, str(exc)) from exc
                 gw.org.ledger.append("import", "-", {"by": user.email, "what": which, "rows": n, "errors": len(errors)})
-                return self._json(200, {"imported": n, "errors": errors[:50]})
+                return self._json(200, {"imported": n, "already_there": already, "errors": errors[:50]})
+            if route == "payment-run" and m == "POST":
+                self._user("admin", "approver")
+                text = self._csv()
+                try:
+                    rows, errors = read_payment_run(gw.org.store, text)
+                except ValueError as exc:
+                    raise HTTPError(422, str(exc)) from exc
+                if not rows:
+                    raise HTTPError(422, "No payments found in the file. " + " ".join(errors[:3]))
+                out = gw.check_run(rows, user.email, hashlib.sha256(text.encode()).hexdigest())
+                return self._json(200, {**out, "errors": errors[:50]})
+            if route == "setup" and m == "GET":
+                return self._json(200, views.setup(gw, accounts.users(user.org_id), registry.agent_key_count(user.org_id)))
+            if route == "vendors" and m == "POST":
+                self._user("admin")
+                b = self._body({"vendor_id", "name", "bank_account", "email_domains", "phone"})
+                vid, name, acct = (str(b.get(k, "")).strip() for k in ("vendor_id", "name", "bank_account"))
+                if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", vid):
+                    raise HTTPError(422, "Vendor ID: letters, digits, dot, dash or underscore, up to 64.")
+                if not name or len(name) > 200:
+                    raise HTTPError(422, "Enter the vendor's name.")
+                if not re.fullmatch(r"[A-Za-z0-9 -]{4,64}", acct) or not any(ch.isdigit() for ch in acct):
+                    raise HTTPError(422, "Enter the bank account (IBAN or account number).")
+                if gw.org.store.vendor(vid):
+                    raise HTTPError(409, "A vendor with that ID already exists.")
+                v = Vendor(vid, name, acct, _domains(str(b.get("email_domains", ""))), gw.clock().date(),
+                           phone=str(b.get("phone", ""))[:40])
+                gw.org.store.upsert_vendor(v)
+                gw.org.ledger.append("records", "-", {"by": user.email, "event": "vendor added", "vendor": vid})
+                return self._json(200, {"vendors": views.vendors(gw)})
+            if route.startswith("vendors/") and route.endswith("/bank-change") and m == "POST":
+                self._user("admin", "approver")
+                vid = urllib.parse.unquote(route.split("/")[1])
+                b = self._body({"new_account", "note"})
+                d = gw.submit_person({
+                    "request_id": "bank-" + secrets.token_hex(8), "action": "change_bank", "vendor_id": vid,
+                    "bank_account": str(b.get("new_account", "")).strip()[:64],
+                    "evidence": [{"kind": "other", "ref": (str(b.get("note", "")).strip() or "requested in the web app")[:300]}],
+                }, user.email)
+                return self._json(200, d.to_dict())
+            if route.startswith("vendors/") and m == "POST":
+                self._user("admin")
+                vid = urllib.parse.unquote(route.split("/", 1)[1])
+                b = self._body({"name", "email_domains", "phone"})
+                v = gw.org.store.vendor(vid)
+                if v is None:
+                    raise HTTPError(404, "no such vendor")
+                name = str(b.get("name", v.name)).strip()[:200] or v.name
+                domains = _domains(str(b["email_domains"])) if "email_domains" in b else v.email_domains
+                gw.org.store.upsert_vendor(Vendor(v.vendor_id, name, v.bank_account, domains, v.created_on,
+                                                  v.bank_changed_on, str(b.get("phone", v.phone))[:40]))
+                gw.org.ledger.append("records", "-", {"by": user.email, "event": "vendor details edited", "vendor": vid,
+                                                      "fields": sorted(b)})
+                return self._json(200, {"vendors": views.vendors(gw)})
+            if route == "pos" and m == "POST":
+                self._user("admin")
+                b = self._body({"number", "vendor_id", "amount"})
+                number = str(b.get("number", "")).strip()
+                if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,63}", number):
+                    raise HTTPError(422, "Enter the purchase order number.")
+                if gw.org.store.vendor(str(b.get("vendor_id", ""))) is None:
+                    raise HTTPError(422, "Choose a vendor from your vendor list.")
+                if gw.org.store.po(number):
+                    raise HTTPError(409, "That purchase order already exists.")
+                try:
+                    cents = parse_amount(str(b.get("amount", "")))
+                except ValueError as exc:
+                    raise HTTPError(422, f"Amount: {exc}") from exc
+                gw.org.store.upsert_po(PurchaseOrder(number, str(b["vendor_id"]), cents))
+                gw.org.ledger.append("records", "-", {"by": user.email, "event": "purchase order added", "po": number})
+                return self._json(200, {"added": number})
+            if route == "agents" and m == "POST":
+                self._user("admin")
+                b = self._body({"agent_id", "made_by", "allowed_actions", "max_amount", "daily_cap"})
+                agent_id = str(b.get("agent_id", "")).strip().lower()
+                if not re.fullmatch(r"[a-z0-9][a-z0-9-]{1,40}", agent_id):
+                    raise HTTPError(422, "Agent name: lowercase letters, digits and dashes, 2 to 41 long.")
+                if agent_id in gw.org.policy.agents:
+                    raise HTTPError(409, "An agent with that name already exists.")
+                key = registry.add_agent(user.org_id, agent_id, self._scope(b))
+                gw.org.ledger.append("records", "-", {"by": user.email, "event": "agent added", "agent": agent_id})
+                return self._json(200, {"agent_id": agent_id, "key": key})
+            if route.startswith("agents/") and route.endswith("/remove") and m == "POST":
+                self._user("admin")
+                agent_id = route.split("/")[1]
+                if agent_id not in gw.org.policy.agents:
+                    raise HTTPError(404, "no such agent")
+                self._body(set())
+                revoked = registry.remove_agent(user.org_id, agent_id)
+                gw.org.ledger.append("records", "-", {"by": user.email, "event": "agent removed", "agent": agent_id,
+                                                      "keys_revoked": revoked})
+                return self._json(200, {"removed": agent_id, "keys_revoked": revoked})
+            if route.startswith("agents/") and m == "POST":
+                self._user("admin")
+                agent_id = route.split("/")[1]
+                if agent_id not in gw.org.policy.agents:
+                    raise HTTPError(404, "no such agent")
+                registry.update_agent(user.org_id, agent_id, self._scope(
+                    self._body({"made_by", "allowed_actions", "max_amount", "daily_cap"})))
+                gw.org.ledger.append("records", "-", {"by": user.email, "event": "agent limits changed", "agent": agent_id})
+                return self._json(200, views.settings(gw, accounts.users(user.org_id)))
+            if route == "people" and m == "POST":
+                self._user("admin")
+                b = self._body({"email", "role"})
+                if b.get("role") not in ("admin", "approver", "auditor"):
+                    raise HTTPError(422, "Role must be admin, approver or auditor.")
+                password = secrets.token_urlsafe(15)
+                registry.add_user(user.org_id, str(b.get("email", "")), b["role"], password)
+                gw.org.ledger.append("records", "-", {"by": user.email, "event": "person added",
+                                                      "person": str(b.get("email", "")).lower(), "role": b["role"]})
+                return self._json(200, {"email": str(b["email"]).strip().lower(), "temporary_password": password})
+            if route.startswith("people/") and m == "POST":
+                self._user("admin")
+                parts = route.split("/")
+                if len(parts) != 3 or parts[2] not in ("disable", "enable", "reset-two-step"):
+                    raise HTTPError(404, "not found")
+                email = urllib.parse.unquote(parts[1]).lower()
+                self._body(set())
+                if accounts.org_of(email) != user.org_id:
+                    raise HTTPError(404, "no such person")
+                if email == user.email and parts[2] == "disable":
+                    raise HTTPError(422, "You can't disable your own account.")
+                if parts[2] == "reset-two-step":
+                    accounts.reset_two_step(email)
+                else:
+                    accounts.set_disabled(email, parts[2] == "disable")
+                gw.org.ledger.append("records", "-", {"by": user.email, "event": f"person: {parts[2]}", "person": email})
+                return self._json(200, {"users": accounts.users(user.org_id)})
             if route == "export/activity.csv" and m == "GET":
                 body = views.activity_csv(gw).encode()
                 return self._send(200, body, "text/csv; charset=utf-8",
                                   {"Content-Disposition": 'attachment; filename="checkpoint-activity.csv"'})
             raise HTTPError(404, "not found")
+
+        def _csv(self) -> str:
+            if not self.headers.get("Content-Type", "").startswith("text/csv"):
+                raise HTTPError(415, "upload a .csv file (in Excel: File, Save As, CSV UTF-8)")
+            try:
+                text = self._read(MAX_CSV).decode("utf-8-sig")
+            except UnicodeDecodeError as exc:
+                raise HTTPError(422, "the file must be UTF-8 text (in Excel, save as CSV UTF-8)") from exc
+            if "\x00" in text or text.count("\n") > MAX_CSV_ROWS:
+                raise HTTPError(422, f"the file must be plain text with at most {MAX_CSV_ROWS} rows")
+            return text
+
+        @staticmethod
+        def _scope(b: dict) -> AgentScope:
+            actions = b.get("allowed_actions")
+            if not isinstance(actions, list) or not actions or not set(actions) <= set(ACTIONS):
+                raise HTTPError(422, f"Choose what the agent may do: {', '.join(ACTIONS)}.")
+            try:
+                max_c = parse_amount(str(b.get("max_amount", "")))
+                day_c = parse_amount(str(b.get("daily_cap", "")))
+            except ValueError as exc:
+                raise HTTPError(422, f"Limits: {exc}") from exc
+            if day_c < max_c:
+                raise HTTPError(422, "The daily limit must be at least the limit per action.")
+            return AgentScope(tuple(dict.fromkeys(actions)), max_c, day_c, str(b.get("made_by", ""))[:80])
 
         @staticmethod
         def _save_settings(gw, user, b: dict) -> dict:
