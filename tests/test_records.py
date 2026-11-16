@@ -104,6 +104,20 @@ def test_history_import(site):
     assert check_amount_outlier(req, Context(store, gw.org.policy, gw.clock()))
 
 
+def test_history_import_cannot_choose_a_refund_account(site):
+    _, gw, _, _ = site
+    store = gw.org.store
+    on_file = store.vendor("V1").bank_account
+    same = f"vendor_id,invoice_number,amount,paid_on,bank_account\nV1,H-1,25.00,2026-02-02,{on_file}\n"
+    added, _, errors = import_history(store, same)
+    assert added == 1 and errors == []
+    assert store.payments()[0].bank_account == on_file
+    other = "vendor_id,invoice_number,amount,paid_on,bank_account\nV1,H-2,25.00,2026-02-03,US9999999999999999\n"
+    added, _, errors = import_history(store, other)
+    assert added == 0 and any("account on file" in e for e in errors)
+    assert [p.invoice_key for p in store.payments()] == ["H1"]
+
+
 def test_old_databases_are_upgraded(tmp_path):
     path = str(tmp_path / "old.db")
     db = sqlite3.connect(path)
