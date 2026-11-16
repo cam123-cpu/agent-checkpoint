@@ -5,8 +5,10 @@ Every accounting system exports with its own column names, so columns are matche
 mean the invoice number. In Excel, save the sheet as "CSV UTF-8" and upload it.
 
 Rules that keep imports from becoming a way around the checkpoint:
-- An import never changes an existing vendor's bank account. That only happens through a bank-change
-  request that a person approves after a phone call (pen test PT-16).
+- An import never changes an existing vendor's bank account, phone number, or email domains.
+  The bank account changes only through a bank-change request that a person approves after a phone
+  call (pen test PT-16). The phone and the domains are what that call and the sender check trust.
+  A file that omits those columns leaves them as they are.
 - Bad rows are reported by line number and skipped; good rows go in together, in one transaction.
 - Dates like 03/04/2026 are ambiguous. The person picks month-first or day-first; anything that
   doesn't parse is reported, never guessed.
@@ -186,9 +188,21 @@ def import_vendors(store: Store, text: str) -> tuple[int, list[str]]:
             if existing and norm_account(existing.bank_account) != norm_account(r["bank_account"]):
                 raise ValueError(f"{vid}: the bank account differs from the one on file. Bank details "
                                  "only change through a bank-change request that a person approves after a phone call")
-            vendors.append(Vendor(vid, r["name"][:200], r["bank_account"][:64], _domains(r.get("email_domains", "")),
+            if existing:
+                domains, phone = existing.email_domains, existing.phone
+                new_domains = _domains(r["email_domains"]) if r.get("email_domains", "").strip() else domains
+                new_phone = r["phone"].strip()[:40] if r.get("phone", "").strip() else phone
+                if set(new_domains) != set(domains):
+                    raise ValueError(f"{vid}: email domains differ from the ones on file. Change them in the "
+                                     "vendor screen, not by importing a file")
+                if new_phone != phone:
+                    raise ValueError(f"{vid}: the phone number differs from the one on file. Change it in the "
+                                     "vendor screen, not by importing a file")
+            else:
+                domains, phone = _domains(r.get("email_domains", "")), r.get("phone", "").strip()[:40]
+            vendors.append(Vendor(vid, r["name"][:200], r["bank_account"][:64], domains,
                                   existing.created_on if existing else created,
-                                  existing.bank_changed_on if existing else None, r.get("phone", "")[:40]))
+                                  existing.bank_changed_on if existing else None, phone))
         except ValueError as exc:
             errors.append(f"line {n}: {exc}")
     with store.tx():
