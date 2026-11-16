@@ -397,7 +397,7 @@ def make_server(registry: Registry, host: str = "127.0.0.1", port: int = 8077, c
             if path == "/v1/tickets" and m == "GET":
                 return self._json(200, {"tickets": views.tickets(gw)})
             if path.startswith("/v1/tickets/") and m == "POST":
-                b = self._body({"approve", "note", "callback_verified", "fraud"})
+                b = self._body({"approve", "note", "callback_verified", "fraud", "called_number"})
                 return self._json(200, self._resolve(gw, path.rsplit("/", 1)[-1], who["name"], b))
             if path == "/v1/fraud-reports" and m == "POST":
                 gw.report_fraud(str(self._body({"request_id"}).get("request_id", "")), who["name"])
@@ -421,8 +421,11 @@ def make_server(registry: Registry, host: str = "127.0.0.1", port: int = 8077, c
             note = b.get("note", "")
             if not isinstance(note, str) or len(note) > 500:
                 raise HTTPError(422, "note must be text, at most 500 characters")
+            called = b.get("called_number", "")
+            if not isinstance(called, str) or len(called) > 40:
+                raise HTTPError(422, "called_number must be text, at most 40 characters")
             return gw.resolve(ticket_id, approver, b["approve"], note, callback_verified=b.get("callback_verified") is True,
-                              fraud=b.get("fraud") is True)
+                              fraud=b.get("fraud") is True, called_number=called)
 
         def _web(self, m: str, route: str, qp):
             self._same_site()
@@ -497,7 +500,7 @@ def make_server(registry: Registry, host: str = "127.0.0.1", port: int = 8077, c
                 return self._json(200, {"tickets": views.tickets(gw)})
             if route.startswith("tickets/") and m == "POST":
                 self._user("admin", "approver")
-                b = self._body({"approve", "note", "callback_verified", "fraud"})
+                b = self._body({"approve", "note", "callback_verified", "fraud", "called_number"})
                 return self._json(200, self._resolve(gw, route.split("/", 1)[1], user.email, b))
             if route == "activity" and m == "GET":
                 verdict = qp("verdict")

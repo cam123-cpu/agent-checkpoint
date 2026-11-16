@@ -84,6 +84,10 @@ def masked_request(req: dict, crypto) -> dict:
     return d
 
 
+def _digits(phone: str) -> str:
+    return "".join(ch for ch in (phone or "") if ch.isdigit())
+
+
 def _run_row(row: dict) -> dict:
     return {"line": row["line"], "vendor_id": row["vendor_id"], "vendor_name": row["vendor_name"],
             "invoice_number": row["invoice_number"], "amount_cents": row["amount_cents"],
@@ -241,7 +245,7 @@ class Gateway:
     # --- humans -----------------------------------------------------------------------
 
     def resolve(self, ticket_id: str, approver: str, approve: bool, note: str = "", *,
-                callback_verified: bool = False, fraud: bool = False) -> dict:
+                callback_verified: bool = False, fraud: bool = False, called_number: str = "") -> dict:
         org, now = self.org, self.clock()
         with org.store.tx():
             t = org.store.ticket(ticket_id)
@@ -260,18 +264,30 @@ class Gateway:
                 raise CheckpointError(409, "ticket has expired")
             approvals = list(t["approvals"])
             if approve:
-                if req.action == "change_bank" and not callback_verified:
-                    raise CheckpointError(422, "bank changes need callback_verified: confirm by phone with "
-                                               "the number on file first")
+                if req.action == "change_bank":
+                    vendor = org.store.vendor(req.vendor_id)
+                    on_file = _digits(vendor.phone if vendor else "")
+                    if not callback_verified:
+                        raise CheckpointError(422, "bank changes need callback_verified: confirm by phone with "
+                                                   "the number on file first")
+                    if not on_file:
+                        raise CheckpointError(422, "This vendor has no phone number on file, so the change can't be "
+                                                   "confirmed. Add one first (a second person approves it).")
+                    if _digits(called_number) != on_file:
+                        raise CheckpointError(422, "Enter the number you called. It must be the number on file, not "
+                                                   "one from the request.")
                 if any(a["by"] == approver for a in approvals):
                     raise CheckpointError(409, "you have already approved this; a second approver is needed")
                 approvals.append({"by": approver, "at": now.isoformat(), "note": note[:500],
-                                  "callback_verified": callback_verified})
+                                  "callback_verified": callback_verified,
+                                  "called_number": _digits(called_number) if req.action == "change_bank" else ""})
                 status = "approved" if len(approvals) >= t["needed"] else "open"
             else:
                 status = "rejected"
             entry = {"ticket_id": ticket_id, "approver": approver, "approve": approve, "status": status,
                      "note": note[:500], "fraud": fraud, "callback_verified": callback_verified}
+            if approve and req.action == "change_bank":
+                entry["called_number"] = _digits(called_number)
 
             if status == "approved":
                 # Re-check: anything that changed since the pause and now blocks wins.
@@ -281,22 +297,30 @@ class Gateway:
                 verdict, _, findings = evaluate(req, ctx)
                 new_blocks = [f for f in findings if f.verdict is Verdict.BLOCK]
                 if t.get("payee_fp") and t["payee_fp"] != self._payee_fp(req):
-                    vendor = org.store.vendor(req.vendor_id)
                     new_blocks.append(Finding("payee_changed", Verdict.BLOCK,
-                                              f"The bank account for {vendor.name if vendor else req.vendor_id} changed "
-                                              f"after this was paused (now {last4(vendor.bank_account) if vendor else '?'}). "
-                                              "Nothing was paid; review it again as a new request.", 1.0))
+                                              f"The account this would be paid to changed after it was paused (now "
+                                              f"{last4(self._payee(req)) or 'none'}), so it isn't the one you were "
+                                              "shown. Nothing was paid; review it again as a new request.", 1.0))
+                seen = {f["check"] for f in t["findings"]}
+                new_pauses = [f for f in findings if f.verdict is Verdict.PAUSE and f.check not in seen]
                 if new_blocks:
                     status = "blocked_on_recheck"
                     entry.update(status=status, recheck=[f.message for f in new_blocks])
+                elif new_pauses:
+                    # Something new needs a look (a split the earlier approval couldn't see, a daily cap...).
+                    # Approvals so far were given without it, so they're cleared and the ticket stays open.
+                    status, approvals = "open", []
+                    org.store.set_ticket_findings(ticket_id, t["findings"] + self._rows(new_pauses))
+                    entry.update(status="reopened", recheck=[f.message for f in new_pauses])
             org.store.update_ticket(ticket_id, status=status, approvals=approvals,
                                     closed_by=approver if status != "open" else None, note=note[:500], fraud=fraud)
             org.ledger.append("human_decision", req.request_id, entry)
             result = {"ticket_id": ticket_id, "status": status, "approvals": len(approvals), "needed": t["needed"]}
             if status == "approved":
                 result["execution"], result["transfer_id"] = self._execute(req, [a["by"] for a in approvals], now)
-            if status == "blocked_on_recheck":
+            if status == "blocked_on_recheck" or entry.get("status") == "reopened":
                 result["reasons"] = entry["recheck"]
+                result["reopened"] = entry.get("status") == "reopened"
             if fraud and not approve:
                 self._report_fraud(req)
         return result
@@ -341,12 +365,21 @@ class Gateway:
 
     # --- doing it ---------------------------------------------------------------------
 
+    def _payee(self, req: ActionRequest) -> str:
+        """Where money for this action would go right now. Payments: the account on file. Refunds: the account
+        the original payment used. This is what the approver is shown, and what is paid."""
+        if req.action == "pay":
+            vendor = self.org.store.vendor(req.vendor_id)
+            return vendor.bank_account if vendor else ""
+        if req.action == "refund":
+            key = norm_invoice(req.invoice_number)
+            originals = [p for p in self.org.store.payments(req.vendor_id, "pay") if p.invoice_key == key]
+            return originals[0].bank_account if originals else req.bank_account
+        return ""
+
     def _payee_fp(self, req: ActionRequest) -> str:
-        """Fingerprint of where a payment would go right now: what the approver is shown."""
-        if req.action != "pay":
-            return ""
-        vendor = self.org.store.vendor(req.vendor_id)
-        return self.org.store.crypto.fingerprint(norm_account(vendor.bank_account)) if vendor else ""
+        payee = self._payee(req)
+        return self.org.store.crypto.fingerprint(norm_account(payee)) if payee else ""
 
     @staticmethod
     def _rows(findings) -> list[dict]:
@@ -361,11 +394,7 @@ class Gateway:
         key = norm_invoice(req.invoice_number)
         transfer_id = None
         if req.action in ("pay", "refund"):
-            if req.action == "pay":
-                payee = vendor.bank_account if vendor else req.bank_account_on_invoice
-            else:
-                originals = [p for p in store.payments(req.vendor_id, "pay") if p.invoice_key == key]
-                payee = originals[0].bank_account if originals else req.bank_account
+            payee = self._payee(req) or req.bank_account_on_invoice
             if not shadow:
                 receipt = org.signer.issue(request_id=req.request_id, action=req.action, vendor_id=req.vendor_id,
                                            amount_cents=req.amount_cents, payee_account=payee, invoice_key=key,

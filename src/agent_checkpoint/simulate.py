@@ -206,7 +206,9 @@ def run(mode: str, seed: int = 0, decide=None, intel=None):
         d = gw.submit(raw, agent_id=agent)
         if d.ticket_id and decide:
             first = decide(label, raw)
+            v = gw.org.store.vendor(raw.get("vendor_id", ""))
             gw.resolve(d.ticket_id, "controller@company.com", first, "", callback_verified=first,
+                       called_number=v.phone if v else "",
                        fraud=not first and label == "incident")
             t = gw.org.store.ticket(d.ticket_id)
             if t["status"] == "open":  # needs a second approver

@@ -51,7 +51,8 @@ def seed(home: str, password: str | None = None):
         if d.ticket_id and dt.date() < CUTOFF:
             ok = label == "policy_hold"
             gw.resolve(d.ticket_id, ADMIN, ok, "Called the vendor; confirmed." if ok else "Not genuine.",
-                       callback_verified=ok, fraud=not ok and label == "incident")
+                       callback_verified=ok, fraud=not ok and label == "incident",
+                       called_number=(gw.org.store.vendor(raw.get("vendor_id", "")) or type("V", (), {"phone": ""})).phone)
             if gw.org.store.ticket(d.ticket_id)["status"] == "open":
                 gw.resolve(d.ticket_id, "cfo@acme-manufacturing.example", True)
     # Two more for the demo: a genuine-looking bank change, and a payment that needs two people.

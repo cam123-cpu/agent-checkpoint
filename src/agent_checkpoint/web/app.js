@@ -454,6 +454,7 @@
     fact("Purchase order", t.po_number || (t.action === "pay" ? "None" : ""));
     fact("Asked by", t.requested_by ? t.requested_by.identity : "Nobody recorded");
     fact("Account on file", t.account_on_file);
+    fact("Pays to", t.action === "refund" ? t.pays_to : "");
     fact("Account on the invoice", t.account_on_invoice, t.account_on_invoice && t.account_on_invoice !== t.account_on_file ? "differs" : "");
     fact("New account requested", t.new_account, "differs");
     fact("Evidence", t.evidence.map((e) => e.ref + (e.sender ? " from " + e.sender : "")).join(", "));
@@ -467,11 +468,15 @@
     const approve = h("button", { type: "button" }, verb);
     const reject = h("button", { type: "button", class: "danger" }, "Reject");
     const fraud = h("button", { type: "button", class: "link" }, "Reject and report as fraud");
-    let called = null;
+    let called = null, dialled = null;
+    const digits = (s) => (s || "").replace(/\D/g, "");
+    const ready = () => !!(called && called.checked && digits(dialled.value) && digits(dialled.value) === digits(t.phone_on_file));
     if (t.action === "change_bank") {
       called = h("input", { type: "checkbox", id: "called-" + t.ticket_id });
+      dialled = h("input", { type: "tel", id: "dialled-" + t.ticket_id, autocomplete: "off", inputmode: "tel" });
       approve.disabled = true;
-      called.addEventListener("change", () => { approve.disabled = !called.checked; });
+      for (const el of [called, dialled]) el.addEventListener("input", () => { approve.disabled = !ready(); });
+      called.addEventListener("change", () => { approve.disabled = !ready(); });
     }
 
     async function decide(isApprove, isFraud) {
@@ -479,15 +484,17 @@
       for (const b of [approve, reject, fraud]) b.disabled = true;
       try {
         const out = await api.post("tickets/" + t.ticket_id, {
-          approve: isApprove, note: note.value, callback_verified: !!(called && called.checked), fraud: !!isFraud,
+          approve: isApprove, note: note.value, callback_verified: !!(called && called.checked),
+          called_number: dialled ? dialled.value : "", fraud: !!isFraud,
         });
         let message;
         if (out.status === "open") message = "Approved. One more person needs to approve.";
         else if (out.status === "approved") message = { pay: "Payment approved", change_bank: "Bank change approved", refund: "Refund approved", edit_record: "Edit approved" }[t.action];
+        else if (out.reopened) message = "Not paid yet: something new came up, so it needs approving again. " + (out.reasons || []).join(" ");
         else if (out.status === "blocked_on_recheck") message = "Not approved: something changed since it was paused. " + (out.reasons || []).join(" ");
         else message = isFraud ? "Rejected and reported as fraud" : "Rejected";
         toast(message);
-        if (out.status === "open") return render();
+        if (out.status === "open" || out.reopened) return render();
         li.classList.add("leaving");
         setTimeout(() => {
           li.remove();
@@ -502,7 +509,7 @@
         status.textContent = e.message;
         status.hidden = false;
         for (const b of [approve, reject, fraud]) b.disabled = false;
-        if (called) approve.disabled = !called.checked;
+        if (called) approve.disabled = !ready();
       }
     }
     approve.addEventListener("click", () => decide(true, false));
@@ -520,6 +527,7 @@
         canDecide ? [
           called ? h("label", { class: "check", for: called.id }, called,
             h("span", { text: "I called the vendor on " + (t.phone_on_file || "the number on file") + " and they confirmed the new account." })) : null,
+          dialled ? h("div", {}, h("label", { for: dialled.id, text: "Number you called (must match the number on file, not one from the request)" }), dialled) : null,
           h("div", {}, h("label", { for: note.id, text: "Note (optional, saved in the audit log)" }), note),
           h("div", { class: "stub-actions" }, approve, reject, h("span", { class: "spacer" }), fraud),
           status,

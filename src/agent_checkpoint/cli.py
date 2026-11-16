@@ -220,7 +220,8 @@ def cmd_tickets(args) -> int:
 def cmd_resolve(args, approve: bool) -> int:
     gw = _registry(args).gateway(args.org)
     out = gw.resolve(args.ticket, args.as_, approve, args.note or "",
-                     callback_verified=getattr(args, "callback_verified", False), fraud=getattr(args, "fraud", False))
+                     callback_verified=getattr(args, "callback_verified", False), fraud=getattr(args, "fraud", False),
+                     called_number=getattr(args, "called_number", "") or "")
     print(json.dumps(out, indent=2))
     return 0
 
@@ -291,6 +292,7 @@ def build_parser() -> argparse.ArgumentParser:
         s.add_argument("--as", dest="as_", required=True, help="approver email"); s.add_argument("--note")
         if approve:
             s.add_argument("--callback-verified", action="store_true", help="you phoned the number on file")
+            s.add_argument("--called-number", default="", help="the number you dialled; must match the one on file")
         else:
             s.add_argument("--fraud", action="store_true", help="report to the shared fraud network")
         s.set_defaults(fn=lambda a, ap=approve: cmd_resolve(a, ap))

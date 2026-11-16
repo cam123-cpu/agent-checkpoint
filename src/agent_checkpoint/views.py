@@ -13,6 +13,7 @@ import io
 from collections import Counter
 from datetime import timedelta
 
+from .models import ActionRequest
 from .store import last4
 
 _RANK = {"block": 2, "pause": 1, "go": 0}
@@ -50,6 +51,7 @@ def tickets(gw) -> list[dict]:
             "requested_by": r["instructed_by"], "risk": decision.get("risk", 0),
             "reasons": [f["message"] for f in t["findings"] if f["verdict"] != "go"],
             "account_on_file": last4(vendor.bank_account) if vendor else "",
+            "pays_to": last4(gw._payee(ActionRequest.from_stored(r))) if r["action"] in ("pay", "refund") else "",
             "account_on_invoice": last4(r["bank_account_on_invoice"]) if r["bank_account_on_invoice"] else "",
             "new_account": last4(r["bank_account"]) if r["action"] == "change_bank" else "",
             "phone_on_file": vendor.phone if vendor else "",

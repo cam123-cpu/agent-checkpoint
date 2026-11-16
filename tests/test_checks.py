@@ -144,7 +144,7 @@ def test_genuine_bank_change_needs_callback_then_payments_pause(gw, clock):
     with pytest.raises(CheckpointError) as e:
         gw.resolve(d.ticket_id, "cfo@acme.com", True)
     assert e.value.status == 422
-    gw.resolve(d.ticket_id, "cfo@acme.com", True, "called +1 555 0100", callback_verified=True)
+    gw.resolve(d.ticket_id, "cfo@acme.com", True, "called +1 555 0100", callback_verified=True, called_number="+1 555 0100")
     clock.advance(days=2)
     p = gw.submit(pay("R9"), agent_id="ap")
     assert p.verdict is Verdict.PAUSE and "recent_bank_change" in checks(p)

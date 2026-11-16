@@ -237,7 +237,8 @@ def test_bank_change_requested_in_the_app_needs_another_person_and_a_call(site):
     assert approver.req("POST", f"/api/web/tickets/{d['ticket_id']}", {"approve": True, "callback_verified": True})[0] == 403
     admin = as_("admin@acme.com")
     assert admin.req("POST", f"/api/web/tickets/{d['ticket_id']}", {"approve": True})[0] == 422  # no call
-    assert admin.req("POST", f"/api/web/tickets/{d['ticket_id']}", {"approve": True, "callback_verified": True})[0] == 200
+    assert admin.req("POST", f"/api/web/tickets/{d['ticket_id']}",
+                     {"approve": True, "callback_verified": True, "called_number": "+1 555"})[0] == 200
     assert gw.org.store.vendor("V1").bank_account == "US5555000011112222"
     status, d, _ = approver.req("POST", "/api/web/vendors/V2/bank-change", {"new_account": "US5555000011112222"})
     assert d["verdict"] == "block"  # another vendor's account
