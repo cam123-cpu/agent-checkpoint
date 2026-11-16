@@ -91,6 +91,8 @@ Sign-in supports **two-step codes** from any authenticator app (with recovery co
 require it) and **single sign-on** with Microsoft Entra ID, Google Workspace or any OpenID Connect
 provider. See [deploy/DEPLOY.md](deploy/DEPLOY.md) for TLS, Cloudflare bot protection and SSO set-up.
 
+Security: [SECURITY.md](SECURITY.md) and the [pen test report](docs/PENTEST.md).
+
 A clickable demo with sample data builds with `python scripts/build_demo.py --out dist/demo`.
 The web app meets a 20-point pre-launch security checklist (see [SECURITY.md](SECURITY.md)), and
 its design rules (no gradients, glass, emoji, icon kits, em dashes, opacity hovers, low contrast)

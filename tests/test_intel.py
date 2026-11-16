@@ -33,6 +33,13 @@ def test_blocked_lookalike_domain_can_be_reported(gw, intel, clock):
     assert "known_fraud" in checks(d)
 
 
+def test_our_own_forwarding_domain_is_never_reported(gw, intel):
+    d = gw.submit(pay(amount=12_000_00, po="PO-BIG", sender="fraud@evil.example",
+                      instructed_by={"source": "email", "identity": "fraud@evil.example via ap@acme.com"}), agent_id="ap")
+    gw.resolve(d.ticket_id, "cfo@acme.com", False, fraud=True)
+    assert intel.domain_reports("evil.example") == 1 and intel.domain_reports("acme.com") == 0
+
+
 def test_real_vendor_details_are_never_reported(gw, intel):
     d = gw.submit(pay(amount=12_000_00, po="PO-BIG"), agent_id="ap")
     gw.resolve(d.ticket_id, "cfo@acme.com", False, fraud=True)

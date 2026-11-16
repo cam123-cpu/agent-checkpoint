@@ -104,6 +104,17 @@
     return h("p", { class: "notice error", role: "alert", text: err.message || String(err) });
   }
 
+  // Single sign-on failures arrive as a code in the address. Only these fixed sentences are ever shown, so a
+  // crafted link can't put someone else's words ("call this number") on the real sign-in page.
+  const SSO_ERRORS = {
+    not_configured: "Single sign-on isn't set up for this company.",
+    expired: "That sign-in took too long or was already used. Start again.",
+    provider: "The sign-in provider didn't complete the sign-in. Start again.",
+    token: "The sign-in couldn't be verified. Start again, or ask an admin to check the SSO settings.",
+    no_account: "Your company account isn't set up in Checkpoint yet. Ask an admin to add you.",
+    domain: "That account isn't from your company's domain.",
+  };
+
   // ---------- state and routing ----------
   const state = { me: null, waiting: 0 };
   const root = document.getElementById("app");
@@ -129,7 +140,7 @@
     try {
       state.me = await api.get("me");
     } catch (e) {
-      if (e.status === 401) return renderSignIn(new URLSearchParams(location.search).get("sso_error") || undefined);
+      if (e.status === 401) return renderSignIn(SSO_ERRORS[new URLSearchParams(location.search).get("sso_error")]);
       root.replaceChildren(h("main", { class: "page" }, errorBox(e)));
       return;
     }

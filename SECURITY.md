@@ -40,6 +40,13 @@ tests run in CI on every push.
 Also: slow or silent connections time out (30 s) and TLS handshakes happen off the accept loop;
 failures inside a check block the action (fail closed); the audit log is tamper-evident.
 
+## Penetration test
+
+A pen test on 16 November 2026 ran 30 attacks against a live server. 13 succeeded at first,
+including 5 rated high (most important: a payment approved for one account could be paid to
+another, and a CSV import could change where a vendor is paid). All 13 are fixed, and every attack
+is kept as a regression test. Report: [docs/PENTEST.md](docs/PENTEST.md).
+
 ## Known limits
 
 - One server process holds per-minute API limits in memory; sign-in limits are shared via SQLite.

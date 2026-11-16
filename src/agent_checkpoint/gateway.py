@@ -25,7 +25,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from .checks import Context, _senders, evaluate, learned_weights
+from .checks import Context, _sender_strings, domain_of, evaluate, learned_weights
 from .intel import Intel
 from .ledger import Ledger
 from .models import ActionRequest, Decision, Finding, Verdict, money
@@ -128,7 +128,7 @@ class Gateway:
                 d.ticket_id, d.status = "T-" + uuid.uuid4().hex[:12], "awaiting_approval"
                 needed = 2 if req.amount_cents >= org.policy.dual_approval_cents else 1
                 org.store.add_ticket(d.ticket_id, req.to_dict(), self._rows(findings), needed, now,
-                                     now + timedelta(hours=org.policy.ticket_hours))
+                                     now + timedelta(hours=org.policy.ticket_hours), self._payee_fp(req))
                 notify = (d.ticket_id, phone_message(org, req, findings))
             elif returned is Verdict.BLOCK:
                 d.status = "blocked"
@@ -213,6 +213,12 @@ class Gateway:
                               org.store.spent_on(req.agent_id, now.date()))
                 verdict, _, findings = evaluate(req, ctx)
                 new_blocks = [f for f in findings if f.verdict is Verdict.BLOCK]
+                if t.get("payee_fp") and t["payee_fp"] != self._payee_fp(req):
+                    vendor = org.store.vendor(req.vendor_id)
+                    new_blocks.append(Finding("payee_changed", Verdict.BLOCK,
+                                              f"The bank account for {vendor.name if vendor else req.vendor_id} changed "
+                                              f"after this was paused (now {last4(vendor.bank_account) if vendor else '?'}). "
+                                              "Nothing was paid; review it again as a new request.", 1.0))
                 if new_blocks:
                     status = "blocked_on_recheck"
                     entry.update(status=status, recheck=[f.message for f in new_blocks])
@@ -249,9 +255,11 @@ class Gateway:
         for acct in accounts:
             if norm_account(acct) != on_file or req.action == "change_bank":
                 self.org.intel.report(self.org.org_id, account=acct)
-        for d in set(_senders(req)):
-            if not vendor or d not in vendor.email_domains:
-                self.org.intel.report(self.org.org_id, domain=d)
+        # Only the address each message really came from, and never the vendor's or our own domains: a report
+        # must not put a real company (or ourselves) on everyone's block list.
+        protected = set(vendor.email_domains if vendor else ()) | set(self.org.policy.internal_domains)
+        for d in {domain_of(s) for s in _sender_strings(req)} - protected - {""}:
+            self.org.intel.report(self.org.org_id, domain=d)
 
     def expire(self) -> list[str]:
         now, done = self.clock(), []
@@ -265,6 +273,13 @@ class Gateway:
         return done
 
     # --- doing it ---------------------------------------------------------------------
+
+    def _payee_fp(self, req: ActionRequest) -> str:
+        """Fingerprint of where a payment would go right now: what the approver is shown."""
+        if req.action != "pay":
+            return ""
+        vendor = self.org.store.vendor(req.vendor_id)
+        return self.org.store.crypto.fingerprint(norm_account(vendor.bank_account)) if vendor else ""
 
     @staticmethod
     def _rows(findings) -> list[dict]:
