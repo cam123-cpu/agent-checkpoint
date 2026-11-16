@@ -1,0 +1,5 @@
+# TLS in front of the checkpoint. Caddy gets and renews the certificate automatically.
+#   agent-checkpoint serve --host 127.0.0.1 --port 8077 --force-https --public-origin https://checkpoint.example.com
+checkpoint.example.com {
+	reverse_proxy 127.0.0.1:8077
+}

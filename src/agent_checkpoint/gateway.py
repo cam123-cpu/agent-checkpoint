@@ -16,6 +16,9 @@ Every step is written to the ledger: the request, the verdict and why, who appro
 
 from __future__ import annotations
 
+import hashlib
+import json
+import re
 import time
 import uuid
 from collections.abc import Callable
@@ -66,6 +69,21 @@ def phone_message(org: Org, req: ActionRequest, findings) -> str:
     return f"{org.name}: agent {req.agent_id} wants to {verb} {who}. {reasons}. Approve?"
 
 
+_ACCOUNTISH = re.compile(r"\b(?=[A-Za-z0-9 ]*\d{6})[A-Za-z]{0,4}\d[\dA-Za-z ]{7,40}\d\b")
+
+
+def masked_request(req: dict, crypto) -> dict:
+    """What the audit log keeps: account numbers as last 4 + a keyed fingerprint, never in full."""
+    d = json.loads(json.dumps(req))
+    for k in ("bank_account", "bank_account_on_invoice"):
+        if d.get(k):
+            d[k] = f"{last4(d[k])} fp:{crypto.fingerprint(norm_account(d[k]))}"
+    for e in d.get("evidence", []):
+        if e.get("excerpt"):
+            e["excerpt"] = _ACCOUNTISH.sub(lambda m: f"[account {last4(m.group(0))}]", e["excerpt"])
+    return d
+
+
 def _findings_from(rows) -> tuple[Finding, ...]:
     return tuple(Finding(f["check"], Verdict(f["verdict"]), f["message"], f.get("weight", 0.0)) for f in rows)
 
@@ -90,7 +108,7 @@ class Gateway:
         with org.store.tx():
             previous = org.ledger.find(req.request_id, "decision")
             if previous is not None:
-                old = ActionRequest.from_stored(previous["request"])
+                old = ActionRequest.from_stored(org.store.get_request(req.request_id))
                 if old.agent_id != agent_id or old.fingerprint() != req.fingerprint():
                     raise CheckpointError(409, "request_id was already used for a different action")
                 return self._replay(previous)
@@ -115,8 +133,12 @@ class Gateway:
             elif returned is Verdict.BLOCK:
                 d.status = "blocked"
             d.elapsed_ms = (time.perf_counter() - start) * 1000
-            org.ledger.append("decision", req.request_id, {**d.to_dict(), "request": req.to_dict(),
-                                                            "findings_full": self._rows(findings)})
+            full = req.to_dict()
+            org.store.save_request(full)
+            org.ledger.append("decision", req.request_id, {
+                **d.to_dict(), "request": masked_request(full, org.store.crypto),
+                "request_sha256": hashlib.sha256(json.dumps(full, sort_keys=True).encode()).hexdigest(),
+                "findings_full": self._rows(findings)})
             if returned is Verdict.GO:
                 d.status, d.transfer_id = self._execute(req, [], now)
         if notify:
@@ -213,7 +235,7 @@ class Gateway:
         previous = self.org.ledger.find(request_id, "decision")
         if previous is None:
             raise CheckpointError(404, "no such request")
-        req = ActionRequest.from_stored(previous["request"])
+        req = ActionRequest.from_stored(self.org.store.get_request(request_id))
         self._report_fraud(req)
         self.org.ledger.append("fraud_report", request_id, {"by": reporter})
 

@@ -70,9 +70,9 @@ def test_unanswered_tickets_expire_fail_closed(gw, clock):
 def test_recheck_at_approval_catches_what_changed(gw):
     d = gw.submit(pay("R1", 12_000_00, "INV-5", "PO-BIG", bank_account_on_invoice="GB00X"), agent_id="ap")
     assert d.verdict is Verdict.PAUSE
-    gw.org.store.q("INSERT INTO payments (request_id, agent_id, vendor_id, invoice_key, amount_cents, bank_account, "
-                   "on_date, kind, via) VALUES ('other', 'human', 'V1', '5', 1200000, ?, '2026-10-01', 'pay', 'rail')",
-                   (ACCT,))  # someone paid INV-5 by hand meanwhile
+    from agent_checkpoint.store import Payment
+    gw.org.store.record_payment(Payment("other", "human", "V1", "5", 12_000_00, ACCT, gw.clock().date(), "pay",
+                                        "rail"))  # someone paid INV-5 by hand meanwhile
     out = gw.resolve(d.ticket_id, "cfo@acme.com", True)
     assert out["status"] == "blocked_on_recheck" and "already paid" in out["reasons"][0]
 

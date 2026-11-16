@@ -2,13 +2,14 @@
 
     <home>/
       keys.json                 sha256(key) → {org, kind: agent|approver, name}. Keys are never stored.
+      web.db                    people who sign in to the web app, their sessions and sign-in limits
       network/intel.db, intel.key   the shared fraud network
       orgs/<org_id>/
         policy.json             the company's rules (edit this)
         notify.json             optional: {"webhook_url": "...", "approve_url": "..."}
         books.db                vendors, POs, payments, tickets, transfers
         ledger.db               the tamper-evident log
-        ledger.key, signing.pem secrets, mode 600
+        ledger.key, data.key, signing.pem   secrets, mode 600
 
 Every company is its own folder and its own databases, so no query can cross companies.
 """
@@ -24,6 +25,7 @@ import secrets
 import threading
 from dataclasses import replace
 
+from .accounts import Accounts, User
 from .gateway import Gateway, Org
 from .intel import Intel
 from .ledger import Ledger
@@ -52,6 +54,7 @@ class Registry:
         self._lock = threading.Lock()
         self._orgs: dict[str, Gateway] = {}
         self._intel: Intel | None = None
+        self._accounts: Accounts | None = None
 
     # --- setup ----------------------------------------------------------------------
 
@@ -93,6 +96,7 @@ class Registry:
         with open(os.path.join(d, "org.json"), "w") as f:
             json.dump({"org_id": org_id, "name": name}, f)
         _write_secret(os.path.join(d, "ledger.key"), secrets.token_bytes(32))
+        _write_secret(os.path.join(d, "data.key"), secrets.token_bytes(32))
         Signer.generate(org_id).save(os.path.join(d, "signing.pem"))
 
     def save_policy(self, org_id: str, policy: Policy) -> None:
@@ -127,6 +131,23 @@ class Registry:
         if email not in p.approvers:
             self.save_policy(org_id, replace(p, approvers=p.approvers + (email,)))
         return self._new_key("apk", org_id, "approver", email)
+
+    def accounts(self) -> Accounts:
+        if self._accounts is None:
+            self.init()
+            self._accounts = Accounts(os.path.join(self.home, "web.db"))
+        return self._accounts
+
+    def add_user(self, org_id: str, email: str, role: str, password: str) -> User:
+        """A person who signs in to the web app. Admins and approvers can approve tickets."""
+        if not os.path.isdir(self.org_dir(org_id)):
+            raise KeyError(org_id)
+        user = self.accounts().create_user(email, org_id, role, password)
+        if role in ("admin", "approver"):
+            p = self.policy(org_id)
+            if user.email not in p.approvers:
+                self.save_policy(org_id, replace(p, approvers=p.approvers + (user.email,)))
+        return user
 
     def revoke(self, key: str) -> bool:
         with self._lock:
@@ -165,7 +186,9 @@ class Registry:
                 meta = json.load(f)
             with open(os.path.join(d, "ledger.key"), "rb") as f:
                 ledger_key = f.read()
-            store = Store(os.path.join(d, "books.db"))
+            with open(os.path.join(d, "data.key"), "rb") as f:
+                data_key = f.read()
+            store = Store(os.path.join(d, "books.db"), data_key)
             signer = Signer.load(os.path.join(d, "signing.pem"), org_id)
             notifier = ConsoleNotifier()
             np = os.path.join(d, "notify.json")
