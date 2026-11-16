@@ -13,11 +13,24 @@ from agent_checkpoint.models import Verdict
 from agent_checkpoint.receipts import ReceiptError, Signer, Verifier
 
 
+def test_shadow_does_not_keep_a_bank_change_the_checks_would_block(gw):
+    from conftest import bank_change
+    gw.org.policy = replace(gw.org.policy, mode="shadow")
+    before = gw.org.store.vendor("V1").bank_account
+    d = gw.submit(bank_change(sender="ap@acmesupp1ies.com"), agent_id="ap")
+    assert d.verdict is Verdict.BLOCK and d.returned is Verdict.GO
+    assert gw.org.store.vendor("V1").bank_account == before
+    assert gw.org.ledger.find("C1", "executed")["bank_change_applied"] is False
+
+
 def test_shadow_mode_never_blocks_but_records(gw):
     gw.org.policy = replace(gw.org.policy, mode="shadow")
+    billed = gw.org.store.po("PO-1").billed_cents
     d = gw.submit(pay(amount=48_000_00), agent_id="ap")
     assert d.verdict is Verdict.BLOCK and d.returned is Verdict.GO and d.status == "observed"
-    assert gw.org.store.payments()[0].via == "observed"
+    assert gw.org.store.payments() == []  # a block is not written into the books the next payment trusts
+    assert gw.org.store.po("PO-1").billed_cents == billed
+    assert gw.org.ledger.find("R1", "executed")["books_changed"] is False
     assert gw.org.store.q("SELECT COUNT(*) FROM transfers")[0][0] == 0  # shadow never moves money
     assert gw.org.ledger.find("R1", "decision")["verdict"] == "block"
 

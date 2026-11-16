@@ -1,8 +1,10 @@
 """The shared fraud network: what one company learns protects every company.
 
 When an approver rejects a ticket and marks it as fraud, the bank account and the sender's
-email domain go into a shared list. The next time *any* company's agent is asked to pay or
-switch to that account, or acts on a request from that domain, the checkpoint blocks it.
+email domain go into a shared list. The next time any company's agent on this same installation
+is asked to pay or switch to that account, or acts on a request from that domain, the checkpoint
+blocks it. The list is one database file (`network/intel.db`). It is not a hosted exchange
+between customers who run their own servers.
 
 Privacy: accounts are stored only as a keyed hash (HMAC-SHA256 with the network key, a
 "blind index"), so the shared list can answer "has this account been reported?" without

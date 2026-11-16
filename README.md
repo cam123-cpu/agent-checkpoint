@@ -15,7 +15,7 @@ tools. None of them lets the agent choose where money goes.
 ```
   Agents from any vendor              Agent Checkpoint                         Company systems
  ┌──────────────────────┐   MCP   ┌───────────────────────────────┐  receipt  ┌──────────────────┐
- │ AP agent (Claude)    │────────▶│ 19 checks (< 2 ms)             │─────────▶│ Payment rail     │
+ │ AP agent (Claude)    │────────▶│ 20 checks (< 2 ms)             │─────────▶│ Payment rail     │
  │ CRM refund agent     │  HTTP   │ go / pause / block             │          │ (bank, ERP pay)  │
  │ Ops agent            │────────▶│ approvals: phone, 2-person     │          └──────────────────┘
  └──────────────────────┘         │ signed receipts (Ed25519)      │  read    ┌──────────────────┐
@@ -81,8 +81,12 @@ a phone (add it to the home screen) and on a desktop:
 - **Audit log.** The integrity check and the fingerprint to hand to your auditor.
 - **Payment run.** Upload the bills you're about to pay (CSV from Excel or your accounting system) and get
   Ready to pay / Review first / Don't pay for each one: duplicates in the file and against past payments,
-  bank accounts that differ from the vendor list, unknown vendors, splits, unusual amounts. Nothing is
-  paid or changed. This works for companies that don't use AI agents yet.
+  bank accounts that differ from the vendor list, unknown vendors, splits, unusual amounts. A line is not
+  held only because it is over the approval limit, so a normal weekly file does not bury the real problems.
+  "Contoso Packaging, LLC" matches "Contoso Packaging". A column named Account is the general-ledger
+  account, not the vendor's bank account. Nothing is paid or changed. Every line is kept on the audit log,
+  and `agent-checkpoint report` prints the ones that were not ready. This works for companies that don't
+  use AI agents yet.
 - **Vendors.** Add and edit vendors; request a bank change (a different person approves it after phoning
   the vendor on the number on file).
 - **Setup.** A getting-started checklist and data-health warnings; rules; importing your vendor list,
@@ -122,12 +126,13 @@ a paid invoice, and a payment to a vendor that doesn't exist.
 |---|---|---|
 | Incidents stopped | 113 / 120 | 113 / 120 |
 | Over-limit / bank-change actions sent to a human | 68 / 68 | 68 / 68 |
-| Clean actions interrupted | 23 / 536 (4.3%)\* | **1 / 536 (0.2%)** |
+| Clean actions interrupted | 6 / 536 (1.1%)\* | **1 / 536 (0.2%)** |
 | Money lost to incidents | $1,378,500 (it only watches) | $45,900 |
 | Slowest decision | < 2 ms | < 2 ms |
 
-\*Mostly side effects of the planted fraud: shadow mode lets the fraudster's bank change through,
-so the real supplier's next invoices clash with the poisoned record. That's worth a pause too.
+\*Shadow still tells the agent to proceed. A block is recorded and is not written into the books:
+not the vendor's account, not the payment, and not the purchase order. Those 6 clean interruptions
+are splits that look like a normal second bill.
 
 **The 7 misses are honest misses.** Six are the *first* half of a split payment, which looks
 normal on its own (the second half is always caught). One is a 3x amount at a vendor whose
@@ -135,9 +140,10 @@ history was too noisy that quarter. **Read all of these numbers as an upper boun
 person wrote the incidents and the checks. The real test is shadow mode on a company's own
 traffic.
 
-Then a second company joins the network. Two weeks later the same fraudster tries the same bank
-account there from a *new* look-alike domain, and it is blocked because the first company marked
-it as fraud.
+Then a second company on the same installation shares that list. Two weeks later the same fraudster
+tries the same bank account there from a *new* look-alike domain, and it is blocked because the
+first company marked it as fraud. Companies on two separate servers do not share reports unless an
+operator points both at one network database.
 
 ## How it works
 
@@ -159,9 +165,10 @@ it as fraud.
 |---|---|---|
 | `agent_scope`, `daily_cap`, `burst` | block / pause | Agent outside its licence, spending too fast, or stuck in a loop |
 | `provenance`, `currency` | block | No evidence, nobody who asked, wrong currency |
-| `unknown_vendor`, `lookalike_vendor`, `new_vendor_large` | block / pause | Fake, hallucinated or look-alike payees |
-| `known_fraud` | block | Account or domain reported by any company on the network |
-| `lookalike_domain`, `unknown_sender` | block / pause | Invoices and requests from domains that aren't the vendor's |
+| `unknown_vendor`, `lookalike_vendor`, `new_vendor`, `new_vendor_large` | block / pause | Fake, hallucinated or look-alike payees, and any payment to a vendor added in the last 30 days |
+| `known_fraud` | block | The account the money would go to, or an account or domain named in the request, reported by any company on this installation |
+| `display_name_spoof` | block | The sender's name shows one address and the message came from another |
+| `lookalike_domain`, `unknown_sender` | block / pause | Invoices and requests from domains that aren't the vendor's. A punycode name counts only when the decoded name is close |
 | `invoice_account_differs` | pause | Invoice prints a different account (redirection, prompt injection). Payment still goes to the account on file |
 | `recent_bank_change` | pause | Paying an account changed in the last 14 days |
 | `bank_change`, `shared_account` | pause / block | Any bank change needs a phone call to the number on file; another vendor's account is blocked |
@@ -185,6 +192,7 @@ agent-checkpoint add-agent acme ap-agent --actions pay,change_bank --max 100000 
 agent-checkpoint add-approver acme controller@acme.com
 agent-checkpoint import-vendors acme examples/vendors.csv
 agent-checkpoint import-pos acme examples/pos.csv
+agent-checkpoint import-history acme payments.csv --date-order mdy
 agent-checkpoint serve --port 8077                # behind TLS; agents use HTTP or `mcp --url`
 agent-checkpoint report acme --since 2026-11-01   # the shadow-mode report for the CFO
 ```
@@ -200,11 +208,16 @@ the report has earned it.
 - **A real rail.** Implement `Rail.execute` for a bank or ERP payment API. The receipt contract is done.
 - **Bank-ownership verification.** Partner with an account-validation provider for "does this
   account belong to this company?"
-- **Approver app.** Passkey step-up on approve, and push. The API is there.
-- **Encryption at rest** for bank details, **PostgreSQL**, SSO. All already solved in the Invoice
-  Anomaly Detector and portable.
+- **Approver app.** Passkey step-up on approve, and push. The API and the phone-sized web app are there.
+- **PostgreSQL.** Each company is one SQLite file. A shared database server is not built.
+- **A fraud list across separate deployments.** Companies on one installation share `network/intel.db`.
+  Nothing syncs that file between customers who install separately.
 - **Bypass through other tools.** An agent that still has *other* payment tools can go around the
   checkpoint. Deployment has to remove them, and receipts make that enforceable at the bank.
+
+Bank details are encrypted at rest (AES-256-GCM, one key per company). Sign-in can be a password
+plus an authenticator code, or Microsoft Entra ID, Google Workspace, or any OpenID Connect provider.
+Both are in the product today. See [SECURITY.md](SECURITY.md).
 
 See [docs/MARKET.md](docs/MARKET.md) for the market case and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 for the design.
@@ -213,7 +226,8 @@ for the design.
 
 ```bash
 pip install -e ".[dev]"
-pytest -q          # 135 tests: checks, approvals, receipts, ledger tampering, network, MCP (incl. a real stdio process),
-                   # HTTP, CLI, quality bar, the security checklist, design rules, and a real browser (if Playwright is installed)
+pytest -q          # 201 tests, plus a real browser when Playwright is installed: checks, approvals, receipts,
+                   # ledger tampering, network, MCP (incl. a real stdio process), HTTP, CLI, quality bar,
+                   # the security checklist, and design rules
 ruff check src tests scripts
 ```

@@ -74,12 +74,31 @@ def activity(gw, verdict: str = "", agent: str = "", search: str = "", limit: in
             "request_id": b["request_id"], "at": e["at"], "on": r["on"], "agent_id": r["agent_id"],
             "action": r["action"], "vendor_name": name, "invoice_number": r["invoice_number"],
             "amount_cents": r["amount_cents"], "verdict": b["verdict"], "status": _status(gw, b),
-            "risk": b["risk"],
+            "risk": b["risk"], "seq": e["seq"],
             "reasons": [f["message"] for f in sorted(b["findings"], key=lambda f: _RANK.get(f["verdict"], 0), reverse=True)],
         })
-        if len(rows) >= limit:
-            break
-    return rows
+    for e in gw.org.ledger.entries("payment_run_checked"):
+        for line in e["body"].get("lines", []):
+            if line["verdict"] == "go" and verdict != "go":
+                continue
+            if verdict and line["verdict"] != verdict:
+                continue
+            if agent and agent != "payment-run":
+                continue
+            hay = f"{line['vendor_name']} {line['invoice_number']} {line['vendor_id']}".lower()
+            if q and q not in hay:
+                continue
+            rows.append({
+                "request_id": f"run-{e['seq']}-L{line['line']}", "at": e["at"], "on": e["at"][:10],
+                "agent_id": "payment-run", "action": "pay", "vendor_name": line["vendor_name"],
+                "invoice_number": line["invoice_number"], "amount_cents": line["amount_cents"],
+                "verdict": line["verdict"], "status": "checked", "risk": line["risk"], "seq": e["seq"],
+                "reasons": line["reasons"],
+            })
+    rows.sort(key=lambda r: (r["at"], r["seq"]), reverse=True)
+    for r in rows:
+        r.pop("seq", None)
+    return rows[:limit]
 
 
 def overview(gw, days: int = 90) -> dict:
@@ -94,6 +113,13 @@ def overview(gw, days: int = 90) -> dict:
         agents[r["agent_id"]] += 1
         if r["action"] in ("pay", "refund"):
             money[b["verdict"]] += r["amount_cents"]
+    for e in gw.org.ledger.entries("payment_run_checked"):
+        if e["at"][:10] < since:
+            continue
+        agents["payment-run"] += 1
+        for line in e["body"].get("lines", []):
+            counts[line["verdict"]] += 1
+            money[line["verdict"]] += line["amount_cents"]
     ok, _ = gw.org.ledger.verify()
     return {
         "company": gw.org.name, "mode": gw.org.policy.mode, "days": days, "since": since,
@@ -122,6 +148,11 @@ def audit(gw, limit: int = 100) -> dict:
             "rejected": lambda: "malformed request refused",
             "fraud_report": lambda: f"reported to fraud network by {b.get('by', '')}",
             "execution_failed": lambda: "payment rail refused the receipt",
+            "payment_run_checked": lambda: (
+                f"{b.get('by', 'someone')} checked a payment file: "
+                f"{b.get('summary', {}).get('block', {}).get('count', 0)} don't pay, "
+                f"{b.get('summary', {}).get('pause', {}).get('count', 0)} review, "
+                f"{b.get('summary', {}).get('go', {}).get('count', 0)} ready. Nothing was paid."),
         }.get(e["kind"], lambda: e["kind"])()
         recent.append({"seq": e["seq"], "at": e["at"], "kind": e["kind"], "request_id": e["request_id"],
                        "summary": summary, "hash": e["hash"][:16]})

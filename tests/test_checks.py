@@ -99,6 +99,33 @@ def test_sender_domain_checks(gw):
     assert "unknown_sender" not in checks(d)
 
 
+def test_punycode_lookalike_is_the_name_not_the_prefix(gw):
+    """An internationalized domain is a look-alike only when the name is close, not because it is punycode."""
+    from agent_checkpoint.store import Vendor
+    homoglyph = "аcmesupplies.com".encode("idna").decode("ascii")  # Cyrillic а
+    d = gw.submit(pay("P1", sender=f"billing@{homoglyph}"), agent_id="ap")
+    assert d.verdict is Verdict.BLOCK and "lookalike_domain" in checks(d)
+    unrelated = "點看.com".encode("idna").decode("ascii")
+    d = gw.submit(pay("P2", 1_000_00, "I-9", "PO-BIG", sender=f"billing@{unrelated}"), agent_id="ap")
+    assert "lookalike_domain" not in checks(d) and "unknown_sender" in checks(d) and d.verdict is Verdict.PAUSE
+    books = "bücher.de"
+    gw.org.store.upsert_vendor(Vendor("V3", "Bucher GmbH", "DE89370400440532013000", (books,), date(2024, 1, 1)))
+    own = books.encode("idna").decode("ascii")
+    d = gw.submit(pay("P3", 1_000_00, "I-10", po="", vendor="V3", sender=f"billing@{own}"), agent_id="ap")
+    assert "lookalike_domain" not in checks(d) and "unknown_sender" not in checks(d)
+
+
+def test_new_vendor_payment_pauses_until_the_window_passes(gw, clock):
+    from agent_checkpoint.store import Vendor
+    gw.org.store.upsert_vendor(Vendor("V9", "Totally New Supplies", "US444400001111", ("newsupplies.com",),
+                                      clock().date()))
+    d = gw.submit(pay("N1", 1_000_00, "N-1", po="", vendor="V9", sender="ap@newsupplies.com"), agent_id="ap")
+    assert "new_vendor" in checks(d) and d.verdict is Verdict.PAUSE
+    clock.advance(days=31)
+    d = gw.submit(pay("N2", 1_000_00, "N-2", po="", vendor="V9", sender="ap@newsupplies.com"), agent_id="ap")
+    assert "new_vendor" not in checks(d) and "new_vendor_large" not in checks(d)
+
+
 def test_lookalike_bank_change_blocked(gw):
     d = gw.submit(bank_change(sender="ap@acmesupp1ies.com"), agent_id="ap")
     assert d.verdict is Verdict.BLOCK and "lookalike_domain" in checks(d)

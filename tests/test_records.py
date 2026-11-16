@@ -9,7 +9,7 @@ from datetime import date
 import pytest
 from test_web_security import PW, Client
 
-from agent_checkpoint.importers import import_history, map_headers, parse_date, read_payment_run
+from agent_checkpoint.importers import import_history, import_vendors, map_headers, parse_date, read_payment_run
 from agent_checkpoint.server import ServerConfig, make_server
 from agent_checkpoint.store import PurchaseOrder, Store, Vendor
 from agent_checkpoint.tenancy import Registry
@@ -49,6 +49,23 @@ def history_csv(rows):
 
 # --- importing --------------------------------------------------------------------------
 
+def test_reimport_cannot_blank_or_replace_the_phone_or_the_domains(site):
+    reg, gw, as_, _ = site
+    store = gw.org.store
+    before = store.vendor("V1")
+    # No phone or domain columns: a refresh of the vendor file must not wipe the callback number.
+    n, errors = import_vendors(store, f"vendor_id,name,bank_account\nV1,Northwind Supplies,{ACCT}\n")
+    assert n == 1 and errors == []
+    kept = store.vendor("V1")
+    assert kept.phone == before.phone and kept.email_domains == before.email_domains
+    # A file that names a different phone or domain is refused. The bank account is untouched.
+    n, errors = import_vendors(store, "vendor_id,name,bank_account,email_domains,phone\n"
+                               f"V1,Northwind Supplies,{ACCT},evil.example,+1 999 555 0199\n")
+    assert n == 0 and any("on file" in e for e in errors)
+    assert store.vendor("V1").phone == before.phone
+    assert store.vendor("V1").email_domains == before.email_domains
+
+
 def test_columns_are_matched_by_meaning():
     m = map_headers(["Supplier", "Invoice #", "Amount Paid", "Payment Date", "Remittance email"],
                     ["name", "invoice_number", "amount", "paid_on", "email_domains"])
@@ -85,6 +102,20 @@ def test_history_import(site):
     req = ActionRequest.from_dict({"request_id": "z", "action": "pay", "vendor_id": "V1", "amount_cents": 9_000_00,
                                    "invoice_number": "Z"}, agent_id="a", on=date.today())
     assert check_amount_outlier(req, Context(store, gw.org.policy, gw.clock()))
+
+
+def test_history_import_cannot_choose_a_refund_account(site):
+    _, gw, _, _ = site
+    store = gw.org.store
+    on_file = store.vendor("V1").bank_account
+    same = f"vendor_id,invoice_number,amount,paid_on,bank_account\nV1,H-1,25.00,2026-02-02,{on_file}\n"
+    added, _, errors = import_history(store, same)
+    assert added == 1 and errors == []
+    assert store.payments()[0].bank_account == on_file
+    other = "vendor_id,invoice_number,amount,paid_on,bank_account\nV1,H-2,25.00,2026-02-03,US9999999999999999\n"
+    added, _, errors = import_history(store, other)
+    assert added == 0 and any("account on file" in e for e in errors)
+    assert [p.invoice_key for p in store.payments()] == ["H1"]
 
 
 def test_old_databases_are_upgraded(tmp_path):
@@ -126,11 +157,39 @@ def test_payment_run_finds_problems_and_changes_nothing(site):
     assert by_line[3]["verdict"] == "block" and "line 2 of this payment run" in by_line[3]["reasons"][0]
     assert by_line[4]["verdict"] == "block" and "payment file sends this to account ...0001" in by_line[4]["reasons"][0]
     assert by_line[5]["verdict"] == "go"  # no PO needed in a run; no account given means the account on file
-    assert by_line[6]["verdict"] == "block" and "not in the vendor master" in by_line[6]["reasons"][0]
+    assert by_line[6]["verdict"] == "block" and "not on the vendor list" in by_line[6]["reasons"][0]
     assert out["summary"]["block"]["count"] == 3
     assert (store.counts(), store.po("PO-1").billed_cents, len(gw.org.ledger.entries("decision"))) == before
     entry = gw.org.ledger.entries("payment_run_checked")[-1]["body"]
     assert entry["by"] == "approver@acme.com" and entry["file_sha256"] == "abc"
+    assert {line["invoice_number"] for line in entry["lines"]} >= {"A-1", "A-2"}
+    assert ACCT not in json.dumps(entry["lines"]) and "GB00ATTACKER" not in json.dumps(entry["lines"])
+    from agent_checkpoint.report import render_text, shadow_report
+    text = render_text(shadow_report(gw.org.ledger))
+    assert "Nothing was paid" in text and "A-2" in text
+    from agent_checkpoint.views import activity, audit
+    flagged = activity(gw)
+    assert any(r["agent_id"] == "payment-run" and r["invoice_number"] == "A-2" for r in flagged)
+    assert "don't pay" in audit(gw)["recent"][0]["summary"]
+
+
+def test_payment_run_names_suffixes_limits_and_columns(site):
+    reg, gw, as_, _ = site
+    store = gw.org.store
+    text = f"Supplier,Num,Amount,Account,Payee account\n\"Northwind Supplies, LLC\",BIG-1,\"20,000.00\",1000,{ACCT}\n"
+    rows, errors = read_payment_run(store, text)
+    assert errors == [] and rows[0]["vendor_id"] == "V1" and rows[0]["bank_account"] == ACCT
+    out = gw.check_run(rows, "approver@acme.com", "hash")
+    assert out["rows"][0]["verdict"] == "go"
+    assert not any("approval limit" in reason for reason in out["rows"][0]["reasons"])
+    # Two vendors that strip to the same name are not silently merged.
+    store.upsert_vendor(Vendor("V3", "Northwind Supplies Inc", "US1111222233334444", ("n2.com",), date(2024, 1, 1)))
+    ambiguous, errors = read_payment_run(store, "Vendor,Amount\nNorthwind Supplies LLC,100.00\n")
+    assert errors == [] and ambiguous[0]["vendor_id"] == "Northwind Supplies LLC"
+    bare = map_headers(["Vendor", "Amount", "Account"], ["name", "amount", "bank_account"])
+    assert "bank_account" not in bare
+    numbered = map_headers(["Vendor", "Num", "Amount"], ["name", "invoice_number", "amount"])
+    assert numbered["invoice_number"] == 1
 
 
 def test_payment_run_over_the_web(site):
