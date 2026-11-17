@@ -9,7 +9,7 @@ import urllib.parse
 import pytest
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
-from test_web_security import Client, world  # noqa: F401
+from test_web_security import Client, register, world  # noqa: F401
 
 from agent_checkpoint.oidc import OIDC, SSOConfig, SSOError
 from agent_checkpoint.server import ServerConfig, make_server
@@ -68,7 +68,8 @@ def idp():
 def site(world, idp):  # noqa: F811
     reg, _ = world
     SSOConfig("microsoft", CLIENT, TENANT, "acme.com").save(reg.org_dir("acme"), "secret-xyz")
-    srv = make_server(reg, "127.0.0.1", 0, ServerConfig(secure_cookies=False), oidc=OIDC(idp.get_json, idp.post_form))
+    srv = register(make_server(reg, "127.0.0.1", 0, ServerConfig(secure_cookies=False),
+                               oidc=OIDC(idp.get_json, idp.post_form)), reg)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     yield reg, srv.server_address[1]
     srv.shutdown()
@@ -192,3 +193,22 @@ def test_sso_button_lookup(site):
     assert c.req("GET", "/api/web/sso?org=../../etc")[1]["enabled"] is False
     status, _, r = Client("127.0.0.1", port).req("GET", "/auth/sso/start?org=beta")
     assert status == 302 and r.getheader("Location").startswith("/?sso_error=")
+
+
+def test_admins_need_a_second_factor_at_the_provider(site, idp):
+    msg = _fails(site, idp, email="admin@acme.com")  # no amr claim: the provider didn't say MFA was used
+    assert "second factor" in msg
+    assert "second factor" in _fails(site, idp, email="admin@acme.com", claims={"amr": ["pwd"]})
+    reg, port = site
+    c, _, loc, binding = start(port)
+    q = dict(urllib.parse.parse_qsl(urllib.parse.urlparse(loc).query))
+    idp.nonce, idp.email, idp.claims = q["nonce"], "admin@acme.com", {"amr": ["pwd", "mfa"]}
+    status, _, r = callback(c, binding, q["state"])
+    assert status == 302 and r.getheader("Location") == "/#approvals"
+
+
+def test_company_requiring_two_step_needs_it_from_the_provider_too(site, idp):
+    from dataclasses import replace
+    reg, _ = site
+    reg.save_policy("acme", replace(reg.policy("acme"), require_two_step=True))
+    assert "second factor" in _fails(site, idp, email="approver@acme.com")

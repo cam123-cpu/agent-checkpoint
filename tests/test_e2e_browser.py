@@ -12,6 +12,8 @@ import pytest
 
 sync_api = pytest.importorskip("playwright.sync_api")
 
+from test_web_security import full_admin_session  # noqa: E402
+
 from agent_checkpoint.policy import AgentScope  # noqa: E402
 from agent_checkpoint.server import ServerConfig, make_server  # noqa: E402
 from agent_checkpoint.store import PurchaseOrder, Vendor  # noqa: E402
@@ -42,6 +44,7 @@ def site(tmp_path_factory):
                "instructed_by": {"source": "email", "identity": "ap@v1.com"}}, agent_id="ap")
     srv = make_server(reg, "127.0.0.1", 0, ServerConfig(secure_cookies=False))
     threading.Thread(target=srv.serve_forever, daemon=True).start()
+    SITE_REG[f"http://127.0.0.1:{srv.server_address[1]}"] = reg
     yield f"http://127.0.0.1:{srv.server_address[1]}", reg
     srv.shutdown()
 
@@ -58,6 +61,9 @@ def browser():
         b.close()
 
 
+SITE_REG = {}
+
+
 def sign_in(browser, base, email, viewport=None):
     ctx = browser.new_context(viewport=viewport or {"width": 1280, "height": 900})
     page = ctx.new_page()
@@ -68,6 +74,15 @@ def sign_in(browser, base, email, viewport=None):
     page.fill("#email", email)
     page.fill("#password", PW)
     page.click("button[type=submit]")
+    reg = SITE_REG.get(base)
+    user = reg.accounts().user(email) if reg else None
+    if user is not None and user.role == "admin" and not user.two_step:
+        # Admins land on "set up two-step" (tested in test_two_step_setup_in_the_browser). Other tests continue as if
+        # it were done.
+        page.wait_for_load_state("networkidle")
+        ctx.clear_cookies()
+        ctx.add_cookies([{"name": "cp_session", "value": full_admin_session(reg, email), "url": base}])
+        page.goto(base + "/#approvals")
     page.wait_for_selector(".slip")
     return page, problems
 

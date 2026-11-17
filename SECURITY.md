@@ -34,11 +34,22 @@ tests run in CI on every push.
 | Two-step sign-in | TOTP (RFC 6238) from any authenticator app; ±1 step for clock drift; the last used step is stored with a conditional update so a code can't be replayed, even by two requests racing. The secret is encrypted at rest. The set-up QR code is drawn on the server (no third-party service ever sees the secret) and decoded with OpenCV in tests | `test_two_step.py` (RFC vectors, replay, window, QR scans) |
 | Password alone gets nothing | A correct password with two-step on returns a 5-minute, single-use, 5-try pending token that can only be exchanged for a session with a valid code; failed codes count toward the sign-in limits | `test_enrol_then_sign_in_needs_a_code`, `test_pending_token_allows_only_five_tries` |
 | Recovery codes | Ten one-time codes, shown once, stored as keyed hashes, consumed atomically | `test_recovery_codes_work_once`, `test_secret_and_codes_are_not_stored_in_clear` |
+| Admins always use it | An admin can add people, issue agent keys and change limits, so a password alone never gives an admin anything but the two-step setup screen, whatever the company setting. Admins can't turn it off; a lost phone is reset by another admin and setup is forced again. `doctor` lists admins who haven't set it up | `test_admins_always_need_two_step`, `test_password_only_admin_can_only_set_up_two_step_over_the_web` |
 | Company can require it | People without it get a limited session that can only set it up; admins can't require it before having it (no self-lockout); it can't be turned off while required; turning it off needs password and a code | `test_web_flow_end_to_end`, `test_required_two_step_gives_a_limited_session` |
-| Single sign-on | OpenID Connect authorization code flow with PKCE (S256); `state` single-use, encrypted, expiring and bound to the browser by a cookie (stops sign-in CSRF); `nonce` checked; ID token RS256 signature verified against the provider's published keys (refetched on rotation); `alg` none/HS256 refused; issuer, audience, authorized party, expiry, issued-at and not-before checked; Microsoft own tenant only, identified by directory sign-in name with tenant id checked; Google needs verified email and Workspace domain; optional domain allow-list; never creates accounts; person must belong to that company; error messages come from a fixed list (nothing reflected) | `test_sso.py` (15 rejection cases, key rotation, PKCE), mutation-checked |
+| Single sign-on | OpenID Connect authorization code flow with PKCE (S256); `state` single-use, encrypted, expiring and bound to the browser by a cookie (stops sign-in CSRF); `nonce` checked; ID token RS256 signature verified against the provider's published keys (refetched on rotation); `alg` none/HS256 refused; issuer, audience, authorized party, expiry, issued-at and not-before checked; Microsoft own tenant only, identified by directory sign-in name with tenant id checked; Google needs verified email and Workspace domain; optional domain allow-list; never creates accounts; admins (and everyone, when the company requires two-step) are let in only if the ID token's `amr` shows a second factor, otherwise they sign in with password and code; person must belong to that company; error messages come from a fixed list (nothing reflected) | `test_sso.py` (15 rejection cases, key rotation, PKCE, second-factor rule), mutation-checked |
 
 Also: slow or silent connections time out (30 s) and TLS handshakes happen off the accept loop;
 failures inside a check block the action (fail closed); the audit log is tamper-evident.
+
+## Deployment
+
+`deploy/install.sh` sets up an Ubuntu or Debian server: HTTPS only through Caddy (automatic
+certificates, TLS 1.2+, HTTP redirected), a firewall that allows only SSH, 80 and 443, SSH keys only,
+daily automatic security updates (system, Python, OpenSSL, Caddy) with a reboot window, a weekly
+update and vulnerability audit of the one runtime dependency, and the checkpoint running as its own
+user in a locked-down systemd sandbox with its keys outside the data folder.
+`deploy/external_check.py` checks a deployed server from the outside (TLS, headers, CSRF, auth on
+every API, path probing, open ports, sign-in limits); it runs against a real HTTPS server in CI.
 
 ## Penetration test
 
@@ -46,6 +57,10 @@ A pen test on 16 November 2026 ran 30 attacks against a live server. 13 succeede
 including 5 rated high (most important: a payment approved for one account could be paid to
 another, and a CSV import could change where a vendor is paid). All 13 are fixed, and every attack
 is kept as a regression test. Report: [docs/PENTEST.md](docs/PENTEST.md).
+
+That test was run by the same team that wrote the code, against the code. An independent test of a
+deployed server is planned before any company's money depends on enforce mode; how to scope it is in
+[deploy/DEPLOY.md](deploy/DEPLOY.md).
 
 ## Known limits
 

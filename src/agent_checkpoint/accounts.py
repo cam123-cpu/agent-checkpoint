@@ -254,7 +254,9 @@ class Accounts:
             self._q("INSERT INTO pending_logins VALUES (?, ?, ?, 0)", (self._h(pending), email, (now + PENDING).isoformat()))
             return LoginResult("two_step", pending)
         self._q("DELETE FROM login_failures WHERE key = ?", (f"{ip}|{email}",))
-        limited = bool(require_two_step(org) if callable(require_two_step) else require_two_step)
+        # Admins can add people, issue agent keys and change limits, so a password alone is never enough for one,
+        # whatever the company setting: until they set up two-step, all they can do is set it up.
+        limited = role == "admin" or bool(require_two_step(org) if callable(require_two_step) else require_two_step)
         return LoginResult("session", self._new_session(email, limited), User(email, org, role, limited=limited))
 
     def login_second_step(self, pending: str, code: str, ip: str) -> LoginResult:
@@ -356,7 +358,10 @@ class Accounts:
         return codes
 
     def disable_two_step(self, email: str, password: str, code: str) -> None:
-        rows = self._q("SELECT password_hash FROM users WHERE email = ?", (email,))
+        rows = self._q("SELECT password_hash, role FROM users WHERE email = ?", (email,))
+        if rows and rows[0][1] == "admin":
+            raise AuthError(403, "Admins can't turn off two-step sign-in. To move it to a new phone, set it up again "
+                                 "from your account page, or ask another admin to reset it.")
         if not rows or not _bounded_verify(password or "", rows[0][0]):
             raise AuthError(403, "Your password is incorrect.")
         if not self._check_code(email, code):

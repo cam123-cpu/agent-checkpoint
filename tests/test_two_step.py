@@ -32,7 +32,7 @@ def test_codes_window_and_replay():
 @pytest.fixture
 def acc(tmp_path):
     a = Accounts(str(tmp_path / "w.db"), os.urandom(32))
-    a.create_user("a@x.com", "acme", "admin", PW)
+    a.create_user("a@x.com", "acme", "approver", PW)
     return a
 
 
@@ -181,3 +181,31 @@ def test_qr_codes_scan():
                     img[(y + q) * sc:(y + q + 1) * sc, (x + q) * sc:(x + q + 1) * sc] = 0
         ok += det.detectAndDecode(img)[0] == uri
     assert ok >= 55  # every mask is valid; OpenCV is pickier than phone cameras about a few
+
+
+def test_admins_always_need_two_step(acc):
+    acc.create_user("boss@x.com", "acme", "admin", PW)
+    r = acc.login("boss@x.com", PW, "ip")  # the company doesn't require it; admins need it anyway
+    assert r.kind == "session" and r.user.limited
+    secret = acc.start_two_step("boss@x.com")
+    acc.confirm_two_step("boss@x.com", totp.code_at(secret, int(time.time() // 30)), r.token)
+    assert not acc.session(r.token).limited
+    assert acc.login("boss@x.com", PW, "ip2").kind == "two_step"  # from now on: password and code
+    with pytest.raises(AuthError, match="Admins can't turn off"):
+        acc.disable_two_step("boss@x.com", PW, totp.code_at(secret, int(time.time() // 30) + 1))
+    acc.reset_two_step("boss@x.com")  # lost phone: another admin resets it, and setup is forced again
+    assert acc.login("boss@x.com", PW, "ip3").user.limited
+
+
+def test_password_only_admin_can_only_set_up_two_step_over_the_web(world):  # noqa: F811
+    reg, _ = world
+    srv = serve(reg)
+    try:
+        c = Client("127.0.0.1", srv.server_address[1])
+        assert c.login("admin@acme.com", as_if_two_step=False)[0] == 200
+        assert c.req("GET", "/api/web/me")[1]["setup_required"] is True
+        for path in ("/api/web/tickets", "/api/web/settings", "/api/web/setup", "/api/web/vendors"):
+            assert c.req("GET", path)[0] == 403, path
+        assert c.req("POST", "/api/web/two-step/start", {})[0] == 200
+    finally:
+        srv.shutdown()
