@@ -22,6 +22,7 @@ from datetime import UTC, date, datetime
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from agent_checkpoint import views  # noqa: E402
+from agent_checkpoint.evidence import evidence, usage  # noqa: E402
 from agent_checkpoint.notify import CollectingNotifier  # noqa: E402
 from agent_checkpoint.simulate import account, company_policy, events, setup  # noqa: E402
 from agent_checkpoint.store import PurchaseOrder  # noqa: E402
@@ -51,7 +52,8 @@ def seed(home: str, password: str | None = None):
         if d.ticket_id and dt.date() < CUTOFF:
             ok = label == "policy_hold"
             gw.resolve(d.ticket_id, ADMIN, ok, "Called the vendor; confirmed." if ok else "Not genuine.",
-                       callback_verified=ok, fraud=not ok and label == "incident")
+                       callback_verified=ok, fraud=not ok and label == "incident",
+                       called_number=(gw.org.store.vendor(raw.get("vendor_id", "")) or type("V", (), {"phone": ""})).phone)
             if gw.org.store.ticket(d.ticket_id)["status"] == "open":
                 gw.resolve(d.ticket_id, "cfo@acme-manufacturing.example", True)
     # Two more for the demo: a genuine-looking bank change, and a payment that needs two people.
@@ -110,6 +112,8 @@ def snapshot(reg, gw) -> dict:
                "setup_required": False, "require_two_step": True, "recovery_codes_left": 10},
         "overview": views.overview(gw), "tickets": views.tickets(gw), "activity": views.activity(gw, limit=10_000),
         "audit": views.audit(gw), "vendors": views.vendors(gw),
+        "evidence": {**evidence(gw.org.ledger, hold_limit_pct=gw.org.policy.pilot_hold_limit_pct),
+                     "usage": usage(gw.org.ledger), "public_key": gw.org.signer.public_pem()},
         "settings": {**views.settings(gw, [
             {"email": ADMIN, "role": "admin", "disabled": False, "two_step": True},
             {"email": "cfo@acme-manufacturing.example", "role": "approver", "disabled": False, "two_step": True},

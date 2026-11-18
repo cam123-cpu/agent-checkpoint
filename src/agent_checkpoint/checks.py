@@ -172,19 +172,24 @@ def _accounts_in_play(req, ctx) -> list[str]:
 
 
 def check_fraud_network(req, ctx):
+    """Your own report blocks. One other company's report pauses; two or more block."""
     if ctx.intel is None:
         return []
     out = []
-    for acct in _accounts_in_play(req, ctx):
-        n = ctx.intel.account_reports(acct)
-        if n:
-            out.append(Finding("known_fraud", B, f"Account {last4(acct)} was reported as fraud by {n} "
-                                                 f"compan{'y' if n == 1 else 'ies'} on the network", 0.99))
-    for d in set(_senders(req)):
-        n = ctx.intel.domain_reports(d)
-        if n:
-            out.append(Finding("known_fraud", B, f"Requests from {d} were reported as fraud by {n} "
-                                                 f"compan{'y' if n == 1 else 'ies'} on the network", 0.97))
+    items = [("account", a, f"Account {last4(a)}") for a in _accounts_in_play(req, ctx)]
+    items += [("domain", d, f"Requests from {d}") for d in sorted(set(_senders(req)))]
+    for kind, value, what in items:
+        own, others = ctx.intel.standing(kind, value, ctx.org_id)
+        if own:
+            out.append(Finding("known_fraud", B, f"{what} {'was' if kind == 'account' else 'were'} reported as fraud by "
+                                                 "your company", 0.99))
+        elif others >= 2:
+            out.append(Finding("known_fraud", B, f"{what} {'was' if kind == 'account' else 'were'} reported as fraud by "
+                                                 f"{others} other companies on the network", 0.97))
+        elif others == 1:
+            out.append(Finding("network_report", P, f"{what} {'was' if kind == 'account' else 'were'} reported as fraud "
+                                                    "by one other company on the network. One report doesn't block; "
+                                                    "check it with the vendor before paying.", 0.6))
     return out
 
 
@@ -322,6 +327,12 @@ def check_duplicate(req, ctx):
     prior = ctx.store.payments(req.vendor_id, "pay")
     for p in prior:
         if key and p.invoice_key == key:
+            if ctx.actor == "run" and p.amount_cents != req.amount_cents and not p.request_id.startswith("run-L"):
+                # Real books pay invoices in parts. The same number for a different amount is worth a look,
+                # not an automatic stop; the same number for the same amount is a duplicate.
+                return [Finding("repeat_invoice", P, f"Invoice {req.invoice_number} was already paid on "
+                                                     f"{p.on.isoformat()} ({money(p.amount_cents)}). This line is "
+                                                     f"{money(req.amount_cents)}: an instalment, or a duplicate?", 0.5)]
             if p.request_id.startswith("run-L"):
                 return [Finding("duplicate_payment", B, f"Invoice {req.invoice_number} is also on line "
                                                         f"{p.request_id[5:]} of this payment run", 0.95)]
@@ -358,8 +369,13 @@ def check_split(req, ctx):
     lim = ctx.policy.approval_limit_cents
     if req.action != "pay" or req.amount_cents >= lim:
         return []
+    # In a payment file, a vendor with many small bills a week is normal. Only parts that are each a large
+    # share of the limit look like one bill cut up to stay under it.
+    floor = int(lim * 0.4) if ctx.actor == "run" else 0
+    if req.amount_cents < floor:
+        return []
     window = [p for p in ctx.store.payments(req.vendor_id, "pay")
-              if abs((req.on - p.on).days) <= ctx.policy.split_window_days and p.amount_cents < lim]
+              if abs((req.on - p.on).days) <= ctx.policy.split_window_days and floor <= p.amount_cents < lim]
     total = sum(p.amount_cents for p in window) + req.amount_cents
     if window and total >= lim:
         return [Finding("split_payment", P, f"{len(window) + 1} payments to this vendor within "

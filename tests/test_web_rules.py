@@ -112,3 +112,20 @@ def test_text_contrast_meets_wcag_aa(scheme):
 
 def test_reduced_motion_and_focus_are_respected():
     assert "prefers-reduced-motion" in CSS and ":focus-visible" in CSS
+
+
+def test_no_claim_that_the_bank_enforces_receipts():
+    """No bank or payment system checks releases yet, so nothing may say that one does."""
+    import pathlib
+    import re
+    root = pathlib.Path(__file__).resolve().parent.parent
+    files = [root / "README.md", root / "SECURITY.md", *root.glob("docs/*.md"), *root.glob("deploy/*.md"),
+             *root.glob("src/agent_checkpoint/**/*.py"), *root.glob("src/agent_checkpoint/web/*"),
+             *root.glob("scripts/*")]
+    banned = [r"no receipt,?\s+no money", r"can(?:not|'t)?\s+leave\s+the\s+bank\s+without",
+              r"can(?:no|')t be bypassed", r"no payment can leave"]
+    for f in files:
+        if f.is_file():
+            text = f.read_text(encoding="utf-8", errors="ignore")
+            for pat in banned:
+                assert not re.search(pat, text, re.IGNORECASE), (f.name, pat)

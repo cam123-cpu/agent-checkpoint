@@ -6,8 +6,13 @@ Before any AI agent pays an invoice, issues a refund, changes a supplier's bank 
 a financial record, it has to show the checkpoint **what** it wants to do, **why** (the invoice,
 PO, email or ticket) and **who asked**. In about a millisecond the checkpoint checks this against
 the company's own books and returns **go**, **pause** (a human approves from their phone) or
-**block**. Money moves only with the checkpoint's signed, single-use receipt, and every decision
-goes into a tamper-evident log, which is what you show auditors and insurers.
+**block**. Every decision goes into a tamper-evident log, which is what you show auditors and insurers.
+
+What it does *not* do on its own is stop a payment your bank or payment system sends anyway. The
+included sandbox rail pays only with a signed, single-use receipt, but a real bank, Bill.com, Ramp
+or ERP enforces that only once it is set to check the checkpoint's signed releases or its list of
+allowed accounts (see [docs/PARTNER.md](docs/PARTNER.md)). Until then this is a review before money
+moves, not a gate.
 
 It works with any agent from any vendor. The agent connects over **MCP** (or HTTP) and gets six
 tools. None of them lets the agent choose where money goes.
@@ -66,7 +71,42 @@ Approve or reject from the command line (a phone app would call the same API):
 agent-checkpoint tickets demo
 agent-checkpoint approve demo T-... --as controller@demo.example            # add --callback-verified for bank changes
 agent-checkpoint reject  demo T-... --as controller@demo.example --fraud    # reports it to the shared network
+agent-checkpoint withdraw-report demo REQUEST-ID --as controller@demo.example --reason "it was the real vendor"
 ```
+
+Bank changes need `--callback-verified --called-number "+1 415 555 0100"` (the number on file).
+
+The shared fraud list is cautious by design: your own company's report blocks for you; one report from
+another company only pauses; two or more block. Free-mail domains are never listed, accounts and domains
+are stored as keyed hashes, and a company can withdraw its own report.
+
+## In the path: what a bank or payment system can check
+
+```bash
+agent-checkpoint check-run acme thursday.csv --as cfo@acme.com        # Ready / Review / Don't pay; nothing is paid
+agent-checkpoint release acme run-20261119T150000-1a2b3c4d5e --as cfo@acme.com --out release.json
+agent-checkpoint allowed-accounts acme --as cfo@acme.com --out allowed.json
+agent-checkpoint public-key acme > checkpoint.pem
+
+# On the partner's side, with no data folder: refuse the file unless it is the one that was checked
+agent-checkpoint verify-release release.json --public-key checkpoint.pem --file thursday.csv --used used.txt
+agent-checkpoint verify-release allowed.json --public-key checkpoint.pem --instructions outgoing.csv
+
+agent-checkpoint evidence acme         # hold rate, precision, misses: for an insurer or the bank's risk team
+agent-checkpoint usage acme --since 2026-11-01   # files checked, lines released: what a fee is charged on
+agent-checkpoint mark-line acme RUN 7 fraud --as cfo@acme.com    # what a held line really was
+agent-checkpoint report-miss acme 12000.00 --as cfo@acme.com --note "paid outside the file"
+```
+
+A **release** names the checked file by SHA-256 and lists the lines that may go and the accounts they may
+go to; it is single-use and expires. The **allowed-accounts list** is the locked list of where the company
+pays; every change to it went through a second person and a call to the number on file. Both are signed
+with the company's Ed25519 key and carry account tags, not account numbers. They become a control the day a
+partner refuses payments without them. [docs/PARTNER.md](docs/PARTNER.md) is the spec to hand them, and
+[docs/PILOT.md](docs/PILOT.md) is the first-week runbook.
+
+Keep secrets apart from the data: `AGENT_CHECKPOINT_KEYS=/secure/keys agent-checkpoint move-keys`, then
+`agent-checkpoint doctor`.
 
 ## The web app
 
@@ -75,10 +115,14 @@ a phone (add it to the home screen) and on a desktop:
 
 - **Approvals.** Each paused request as a hold slip: the amount, why it was paused, the account
   on file against the one on the invoice, the evidence, and Approve / Reject / Report as fraud.
-  Bank changes can't be approved until you tick that you phoned the number on file.
+  Bank changes can't be approved until you tick that you phoned the number on file and type the number
+  you dialled, which must be that number. If something new comes up when the last person approves (a split
+  that wasn't visible before, say), the request is not paid: it goes back for approval with the new reason.
 - **Overview.** What was checked, sent to a person and stopped, with amounts.
 - **Activity.** Every agent action, filterable, with the reasons, and CSV export for auditors.
-- **Audit log.** The integrity check and the fingerprint to hand to your auditor.
+- **Audit log.** The integrity check and the fingerprint to hand to your auditor, plus what a bank or
+  insurer asks for: hold rate on real files, how many held lines were real, fraud that got through, the
+  signed allowed-accounts list and the public key.
 - **Payment run.** Upload the bills you're about to pay (CSV from Excel or your accounting system) and get
   Ready to pay / Review first / Don't pay for each one: duplicates in the file and against past payments,
   bank accounts that differ from the vendor list, unknown vendors, splits, unusual amounts. A line is not
@@ -86,7 +130,9 @@ a phone (add it to the home screen) and on a desktop:
   "Contoso Packaging, LLC" matches "Contoso Packaging". A column named Account is the general-ledger
   account, not the vendor's bank account. Nothing is paid or changed. Every line is kept on the audit log,
   and `agent-checkpoint report` prints the ones that were not ready. This works for companies that don't
-  use AI agents yet.
+  use AI agents yet. The page says what share of the file was not ready: on an ordinary file, more than
+  about 15% means the checks don't fit those books yet. An approver can then **sign a release** for the
+  ready lines, for whoever releases the payments (see below).
 - **Vendors.** Add and edit vendors; request a bank change (a different person approves it after phoning
   the vendor on the number on file).
 - **Setup.** A getting-started checklist and data-health warnings; rules; importing your vendor list,
@@ -205,7 +251,10 @@ the report has earned it.
 
 - **Live connectors.** QuickBooks/Xero/NetSuite read sync (vendor master, POs) and bill-payment
   write-back. CSV import works today.
-- **A real rail.** Implement `Rail.execute` for a bank or ERP payment API. The receipt contract is done.
+- **A real rail.** Implement `Rail.execute` for a bank or ERP payment API. Not before the books commit
+  before any outside call (an outbox, so a crash between the two can't pay twice or lose the record).
+- **A partner that checks.** Releases and the allowed-accounts list are signed and verifiable today. No
+  bank or payment system refuses a payment without them yet; that is a partnership, not code.
 - **Bank-ownership verification.** Partner with an account-validation provider for "does this
   account belong to this company?"
 - **Approver app.** Passkey step-up on approve, and push. The API and the phone-sized web app are there.
@@ -213,7 +262,8 @@ the report has earned it.
 - **A fraud list across separate deployments.** Companies on one installation share `network/intel.db`.
   Nothing syncs that file between customers who install separately.
 - **Bypass through other tools.** An agent that still has *other* payment tools can go around the
-  checkpoint. Deployment has to remove them, and receipts make that enforceable at the bank.
+  checkpoint. Deployment has to remove them, and only a partner that checks releases makes that
+  enforceable at the bank.
 
 Bank details are encrypted at rest (AES-256-GCM, one key per company). Sign-in can be a password
 plus an authenticator code, or Microsoft Entra ID, Google Workspace, or any OpenID Connect provider.
@@ -226,7 +276,7 @@ for the design.
 
 ```bash
 pip install -e ".[dev]"
-pytest -q          # 201 tests, plus a real browser when Playwright is installed: checks, approvals, receipts,
+pytest -q          # 233 tests, plus a real browser when Playwright is installed: checks, approvals, receipts,
                    # ledger tampering, network, MCP (incl. a real stdio process), HTTP, CLI, quality bar,
                    # the security checklist, and design rules
 ruff check src tests scripts

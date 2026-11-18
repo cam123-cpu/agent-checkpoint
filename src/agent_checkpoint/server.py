@@ -46,6 +46,7 @@ from urllib.parse import parse_qs, urlparse
 
 from . import qr, totp, views
 from .accounts import AuthError
+from .evidence import evidence, usage
 from .gateway import CheckpointError
 from .importers import _domains, import_history, import_pos, import_vendors, read_payment_run
 from .models import ACTIONS, parse_amount
@@ -397,11 +398,15 @@ def make_server(registry: Registry, host: str = "127.0.0.1", port: int = 8077, c
             if path == "/v1/tickets" and m == "GET":
                 return self._json(200, {"tickets": views.tickets(gw)})
             if path.startswith("/v1/tickets/") and m == "POST":
-                b = self._body({"approve", "note", "callback_verified", "fraud"})
+                b = self._body({"approve", "note", "callback_verified", "fraud", "called_number"})
                 return self._json(200, self._resolve(gw, path.rsplit("/", 1)[-1], who["name"], b))
             if path == "/v1/fraud-reports" and m == "POST":
                 gw.report_fraud(str(self._body({"request_id"}).get("request_id", "")), who["name"])
                 return self._json(200, {"reported": True})
+            if path == "/v1/fraud-reports/withdraw" and m == "POST":
+                b = self._body({"request_id", "reason"})
+                return self._json(200, gw.withdraw_report(str(b.get("request_id", "")), who["name"],
+                                                          str(b.get("reason", ""))[:500]))
             if path == "/v1/report" and m == "GET":
                 return self._json(200, shadow_report(gw.org.ledger, qp("since"), qp("until")))
             if path == "/v1/ledger/verify" and m == "GET":
@@ -421,8 +426,11 @@ def make_server(registry: Registry, host: str = "127.0.0.1", port: int = 8077, c
             note = b.get("note", "")
             if not isinstance(note, str) or len(note) > 500:
                 raise HTTPError(422, "note must be text, at most 500 characters")
+            called = b.get("called_number", "")
+            if not isinstance(called, str) or len(called) > 40:
+                raise HTTPError(422, "called_number must be text, at most 40 characters")
             return gw.resolve(ticket_id, approver, b["approve"], note, callback_verified=b.get("callback_verified") is True,
-                              fraud=b.get("fraud") is True)
+                              fraud=b.get("fraud") is True, called_number=called)
 
         def _web(self, m: str, route: str, qp):
             self._same_site()
@@ -451,7 +459,7 @@ def make_server(registry: Registry, host: str = "127.0.0.1", port: int = 8077, c
                 accounts.logout(self._cookie())
                 return self._json(200, {"signed_out": True}, self._set_cookie("", 0))
 
-            user = self._user(allow_limited=route in ("me", "two-step/start", "two-step/confirm", "password"))
+            user = self._user(allow_limited=route in ("me", "two-step/start", "two-step/confirm"))
             gw = registry.gateway(user.org_id)
             if route == "me" and m == "GET":
                 return self._json(200, {"email": user.email, "role": user.role, "company": gw.org.name,
@@ -472,7 +480,7 @@ def make_server(registry: Registry, host: str = "127.0.0.1", port: int = 8077, c
                 b = self._body({"code"})
                 if not isinstance(b.get("code"), str) or len(b["code"]) > 20:
                     raise HTTPError(422, "Enter the 6-digit code from your authenticator app.")
-                codes = accounts.confirm_two_step(user.email, b["code"])
+                codes = accounts.confirm_two_step(user.email, b["code"], self._cookie())
                 gw.org.ledger.append("account", "-", {"by": user.email, "event": "two-step sign-in turned on"})
                 return self._json(200, {"recovery_codes": codes})
             if route == "two-step/disable" and m == "POST":
@@ -497,7 +505,7 @@ def make_server(registry: Registry, host: str = "127.0.0.1", port: int = 8077, c
                 return self._json(200, {"tickets": views.tickets(gw)})
             if route.startswith("tickets/") and m == "POST":
                 self._user("admin", "approver")
-                b = self._body({"approve", "note", "callback_verified", "fraud"})
+                b = self._body({"approve", "note", "callback_verified", "fraud", "called_number"})
                 return self._json(200, self._resolve(gw, route.split("/", 1)[1], user.email, b))
             if route == "activity" and m == "GET":
                 verdict = qp("verdict")
@@ -543,6 +551,39 @@ def make_server(registry: Registry, host: str = "127.0.0.1", port: int = 8077, c
                     raise HTTPError(422, "No payments found in the file. " + " ".join(errors[:3]))
                 out = gw.check_run(rows, user.email, hashlib.sha256(text.encode()).hexdigest())
                 return self._json(200, {**out, "errors": errors[:50]})
+            run_route = re.fullmatch(r"payment-run/(run-[0-9T]{15}-[0-9a-f]{10})/(release|lines/(\d{1,6})/outcome)", route)
+            if run_route and m == "POST":
+                self._user("admin", "approver")
+                run_id = run_route.group(1)
+                if run_route.group(2) == "release":
+                    self._body(set())
+                    return self._json(200, gw.release_run(run_id, user.email))
+                b = self._body({"outcome", "note"})
+                note = b.get("note", "")
+                if not isinstance(note, str) or len(note) > 500:
+                    raise HTTPError(422, "note must be text, at most 500 characters")
+                return self._json(200, gw.mark_line(run_id, int(run_route.group(3)), str(b.get("outcome", "")),
+                                                    user.email, note))
+            if route == "allowed-accounts" and m == "POST":
+                self._user("admin", "approver")
+                self._body(set())
+                return self._json(200, gw.allowed_accounts(user.email))
+            if route == "misses" and m == "POST":
+                self._user("admin", "approver")
+                b = self._body({"amount", "vendor_id", "run_id", "line", "note"})
+                try:
+                    cents = parse_amount(str(b.get("amount", "")))
+                except ValueError as exc:
+                    raise HTTPError(422, str(exc)) from exc
+                line = b.get("line", 0)
+                if not isinstance(line, int) or isinstance(line, bool) or not 0 <= line < 1_000_000:
+                    raise HTTPError(422, "line must be a line number")
+                return self._json(200, gw.report_miss(user.email, cents, str(b.get("vendor_id", ""))[:64],
+                                                      str(b.get("run_id", ""))[:40], line, str(b.get("note", ""))[:500]))
+            if route == "evidence" and m == "GET":
+                ev = evidence(gw.org.ledger, qp("since", ""), qp("until", ""), gw.org.policy.pilot_hold_limit_pct)
+                return self._json(200, {**ev, "usage": usage(gw.org.ledger, qp("since", ""), qp("until", "")),
+                                        "public_key": gw.org.signer.public_pem()})
             if route == "setup" and m == "GET":
                 return self._json(200, views.setup(gw, accounts.users(user.org_id), registry.agent_key_count(user.org_id)))
             if route == "vendors" and m == "POST":

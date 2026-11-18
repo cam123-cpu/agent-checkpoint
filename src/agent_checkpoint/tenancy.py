@@ -49,9 +49,22 @@ def _write_secret(path: str, data: bytes) -> None:
         f.write(data)
 
 
+def _copy_secret(src: str, dest: str) -> None:
+    with open(src, "rb") as f:
+        data = f.read()
+    _write_secret(dest, data)
+    os.remove(src)
+
+
 class Registry:
-    def __init__(self, home: str):
+    """`keys_home` (or the AGENT_CHECKPOINT_KEYS environment variable) puts every secret in another folder:
+    a mounted secret, an encrypted volume, a different disk. A copy of the data folder alone then can't be
+    decrypted or re-signed. Without it, secrets sit beside the databases, which `doctor` reports."""
+
+    def __init__(self, home: str, keys_home: str | None = None):
         self.home = os.path.abspath(home)
+        kh = keys_home if keys_home is not None else os.environ.get("AGENT_CHECKPOINT_KEYS", "")
+        self.keys_home = os.path.abspath(kh) if kh else ""
         self._lock = threading.Lock()
         self._orgs: dict[str, Gateway] = {}
         self._intel: Intel | None = None
@@ -62,7 +75,7 @@ class Registry:
     def init(self) -> None:
         os.makedirs(os.path.join(self.home, "orgs"), exist_ok=True)
         os.makedirs(os.path.join(self.home, "network"), exist_ok=True)
-        kp = os.path.join(self.home, "network", "intel.key")
+        kp = self.secret_path("intel.key")
         if not os.path.exists(kp):
             _write_secret(kp, secrets.token_bytes(32))
         if not os.path.exists(self._keys_path):
@@ -83,6 +96,44 @@ class Registry:
         os.chmod(tmp, 0o600)
         os.replace(tmp, self._keys_path)
 
+    def secret_path(self, name: str, org_id: str = "") -> str:
+        """Where a secret lives. Separate keys folder if configured (falling back to an existing copy beside
+        the data, from before it was configured); otherwise beside the data."""
+        beside = (os.path.join(self.org_dir(org_id), name) if org_id
+                  else os.path.join(self.home, "network", name) if name == "intel.key" else os.path.join(self.home, name))
+        if not self.keys_home:
+            return beside
+        apart = os.path.join(self.keys_home, org_id or "_", name)
+        if os.path.exists(apart) or not os.path.exists(beside):
+            os.makedirs(os.path.dirname(apart), mode=0o700, exist_ok=True)
+            return apart
+        return beside
+
+    def secrets_beside_data(self) -> list[str]:
+        """Secrets that sit in the data folder: a backup or copy of it carries what's needed to read it."""
+        found = []
+        for root, _dirs, files in os.walk(self.home):
+            found += [os.path.join(root, f) for f in files if f.endswith(".key") or f == "signing.pem"]
+        return sorted(found)
+
+    def move_secrets(self) -> list[str]:
+        """Move every secret into keys_home. Run once after setting AGENT_CHECKPOINT_KEYS."""
+        if not self.keys_home:
+            raise ValueError("set AGENT_CHECKPOINT_KEYS (or --keys) to a folder outside the data folder first")
+        if os.path.commonpath([self.keys_home, self.home]) == self.home:
+            raise ValueError("the keys folder must be outside the data folder")
+        moved = []
+        for path in self.secrets_beside_data():
+            rel = os.path.relpath(path, self.home).split(os.sep)
+            org = rel[1] if rel[0] == "orgs" else ""
+            dest = os.path.join(self.keys_home, org or "_", rel[-1])
+            os.makedirs(os.path.dirname(dest), mode=0o700, exist_ok=True)
+            if os.path.exists(dest):
+                raise ValueError(f"{dest} already exists; not overwriting a key")
+            os.replace(path, dest) if os.stat(path).st_dev == os.stat(os.path.dirname(dest)).st_dev else _copy_secret(path, dest)
+            moved.append(dest)
+        return moved
+
     def org_dir(self, org_id: str) -> str:
         if not _ORG.match(org_id):
             raise ValueError("org id: lowercase letters, digits and dashes")
@@ -96,9 +147,9 @@ class Registry:
             f.write((policy or Policy()).to_json())
         with open(os.path.join(d, "org.json"), "w") as f:
             json.dump({"org_id": org_id, "name": name}, f)
-        _write_secret(os.path.join(d, "ledger.key"), secrets.token_bytes(32))
-        _write_secret(os.path.join(d, "data.key"), secrets.token_bytes(32))
-        Signer.generate(org_id).save(os.path.join(d, "signing.pem"))
+        _write_secret(self.secret_path("ledger.key", org_id), secrets.token_bytes(32))
+        _write_secret(self.secret_path("data.key", org_id), secrets.token_bytes(32))
+        Signer.generate(org_id).save(self.secret_path("signing.pem", org_id))
 
     def save_policy(self, org_id: str, policy: Policy) -> None:
         path = os.path.join(self.org_dir(org_id), "policy.json")
@@ -136,7 +187,7 @@ class Registry:
     def accounts(self) -> Accounts:
         if self._accounts is None:
             self.init()
-            kp = os.path.join(self.home, "web.key")
+            kp = self.secret_path("web.key")
             if not os.path.exists(kp):
                 _write_secret(kp, secrets.token_bytes(32))
             with open(kp, "rb") as f:
@@ -201,7 +252,7 @@ class Registry:
 
     def intel(self) -> Intel:
         if self._intel is None:
-            with open(os.path.join(self.home, "network", "intel.key"), "rb") as f:
+            with open(self.secret_path("intel.key"), "rb") as f:
                 self._intel = Intel(os.path.join(self.home, "network", "intel.db"), f.read())
         return self._intel
 
@@ -214,12 +265,12 @@ class Registry:
                 raise KeyError(org_id)
             with open(os.path.join(d, "org.json")) as f:
                 meta = json.load(f)
-            with open(os.path.join(d, "ledger.key"), "rb") as f:
+            with open(self.secret_path("ledger.key", org_id), "rb") as f:
                 ledger_key = f.read()
-            with open(os.path.join(d, "data.key"), "rb") as f:
+            with open(self.secret_path("data.key", org_id), "rb") as f:
                 data_key = f.read()
             store = Store(os.path.join(d, "books.db"), data_key)
-            signer = Signer.load(os.path.join(d, "signing.pem"), org_id)
+            signer = Signer.load(self.secret_path("signing.pem", org_id), org_id)
             notifier = ConsoleNotifier()
             np = os.path.join(d, "notify.json")
             if os.path.exists(np):

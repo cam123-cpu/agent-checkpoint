@@ -13,6 +13,7 @@ import io
 from collections import Counter
 from datetime import timedelta
 
+from .models import ActionRequest
 from .store import last4
 
 _RANK = {"block": 2, "pause": 1, "go": 0}
@@ -50,6 +51,7 @@ def tickets(gw) -> list[dict]:
             "requested_by": r["instructed_by"], "risk": decision.get("risk", 0),
             "reasons": [f["message"] for f in t["findings"] if f["verdict"] != "go"],
             "account_on_file": last4(vendor.bank_account) if vendor else "",
+            "pays_to": last4(gw._payee(ActionRequest.from_stored(r))) if r["action"] in ("pay", "refund") else "",
             "account_on_invoice": last4(r["bank_account_on_invoice"]) if r["bank_account_on_invoice"] else "",
             "new_account": last4(r["bank_account"]) if r["action"] == "change_bank" else "",
             "phone_on_file": vendor.phone if vendor else "",
@@ -147,6 +149,14 @@ def audit(gw, limit: int = 100) -> dict:
             "executed": lambda: f"{b.get('action', '')} {b.get('status', '')}",
             "rejected": lambda: "malformed request refused",
             "fraud_report": lambda: f"reported to fraud network by {b.get('by', '')}",
+            "fraud_report_withdrawn": lambda: f"fraud report withdrawn by {b.get('by', '')}",
+            "release_issued": lambda: (f"{b.get('by', '')} signed a release: {b.get('released', 0)} lines "
+                                       f"(${b.get('released_cents', 0) / 100:,.2f}), {b.get('held', 0)} held"),
+            "allowed_accounts_issued": lambda: (f"{b.get('by', '')} signed allowed-accounts list version "
+                                                f"{b.get('version', '')} ({b.get('accounts', 0)} accounts)"),
+            "line_outcome": lambda: f"{b.get('by', '')} marked line {b.get('line', '')} as {b.get('outcome', '')}",
+            "miss_reported": lambda: (f"{b.get('by', '')} recorded fraud that got through: "
+                                      f"${b.get('amount_cents', 0) / 100:,.2f}"),
             "execution_failed": lambda: "payment rail refused the receipt",
             "payment_run_checked": lambda: (
                 f"{b.get('by', 'someone')} checked a payment file: "

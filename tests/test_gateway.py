@@ -188,7 +188,7 @@ def test_learned_weights_reorder_but_never_change_verdicts(gw, clock):
 
 def test_bank_change_flow_then_payment_uses_new_account(gw, clock):
     d = gw.submit(bank_change(), agent_id="ap")
-    gw.resolve(d.ticket_id, "cfo@acme.com", True, callback_verified=True)
+    gw.resolve(d.ticket_id, "cfo@acme.com", True, callback_verified=True, called_number="+1 555 0100")
     clock.advance(days=20)
     assert gw.submit(pay("R2"), agent_id="ap").verdict is Verdict.GO
     assert gw.org.store.payments()[0].bank_account == "US7777000011112222"

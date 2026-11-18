@@ -237,7 +237,8 @@ def test_bank_change_requested_in_the_app_needs_another_person_and_a_call(site):
     assert approver.req("POST", f"/api/web/tickets/{d['ticket_id']}", {"approve": True, "callback_verified": True})[0] == 403
     admin = as_("admin@acme.com")
     assert admin.req("POST", f"/api/web/tickets/{d['ticket_id']}", {"approve": True})[0] == 422  # no call
-    assert admin.req("POST", f"/api/web/tickets/{d['ticket_id']}", {"approve": True, "callback_verified": True})[0] == 200
+    assert admin.req("POST", f"/api/web/tickets/{d['ticket_id']}",
+                     {"approve": True, "callback_verified": True, "called_number": "+1 555"})[0] == 200
     assert gw.org.store.vendor("V1").bank_account == "US5555000011112222"
     status, d, _ = approver.req("POST", "/api/web/vendors/V2/bank-change", {"new_account": "US5555000011112222"})
     assert d["verdict"] == "block"  # another vendor's account
@@ -307,3 +308,48 @@ def test_history_import_over_the_web(site):
     assert gw.org.store.payments("V1")[0].on == date(2026, 4, 3)
     assert as_("admin@acme.com").req("POST", "/api/web/import/history?date_order=ymd", raw=csv, ctype="text/csv")[0] == 422
     assert as_("approver@acme.com").req("POST", "/api/web/import/history", raw=csv, ctype="text/csv")[0] == 403
+
+
+def test_release_and_evidence_over_the_web(site):
+    from datetime import UTC, datetime
+
+    from agent_checkpoint.release import check_release, verify
+    reg, gw, as_, _ = site
+    body = b"Vendor,Invoice,Amount\nNorthwind Supplies,N-1,100.00\nContoso,C-1,50.00\nNobody Ltd,X-1,10.00\n"
+    approver = as_("approver@acme.com")
+    status, out, _ = approver.req("POST", "/api/web/payment-run", raw=body, ctype="text/csv")
+    assert status == 200 and out["pilot"]["not_ready"] == 1
+    run_id = out["run_id"]
+    assert as_("audit@acme.com").req("POST", f"/api/web/payment-run/{run_id}/release", {})[0] == 403
+    assert as_("admin@beta.com").req("POST", f"/api/web/payment-run/{run_id}/release", {})[0] == 404  # other company
+    status, doc, _ = approver.req("POST", f"/api/web/payment-run/{run_id}/release", {})
+    assert status == 200
+    signed = verify(gw.org.signer.public_pem(), doc, "release", datetime.now(UTC))
+    assert check_release(signed, body)["release_lines"] == [2, 3]
+    assert approver.req("POST", f"/api/web/payment-run/{run_id}/lines/4/outcome", {"outcome": "fraud"})[0] == 200
+    assert approver.req("POST", f"/api/web/payment-run/{run_id}/lines/4/outcome", {"outcome": "maybe"})[0] == 422
+    assert approver.req("POST", "/api/web/misses", {"amount": "250.00", "note": "wire outside the file"})[0] == 200
+    status, ev, _ = as_("audit@acme.com").req("GET", "/api/web/evidence")
+    assert status == 200 and ev["held_fraud"] == 1 and ev["misses_recorded"] == 1 and "PUBLIC KEY" in ev["public_key"]
+    status, lst, _ = approver.req("POST", "/api/web/allowed-accounts", {})
+    assert status == 200 and lst["body"]["version"] == 1 and len(lst["body"]["accounts"]) == 2
+
+
+def test_po_import_cannot_move_or_raise_an_existing_po(site):
+    _, gw, _, _ = site
+    from agent_checkpoint.importers import import_pos
+    store = gw.org.store
+    n, errors = import_pos(store, "PO number,Vendor,Amount\nPO-1,Contoso,50000.00\nPO-1,Northwind Supplies,90000.00\n"
+                                  "PO-1,Northwind Supplies,40000.00\nPO-9,Contoso,10.00\n")
+    assert len(errors) == 2 and "another vendor" in errors[0] and "go up" in errors[1]
+    assert store.po("PO-1").vendor_id == "V1" and store.po("PO-1").amount_cents == 40_000_00
+    assert store.po("PO-9").vendor_id == "V2"
+
+
+def test_vendor_added_later_without_a_date_is_new(tmp_path):
+    from datetime import date as d
+    store = Store(str(tmp_path / "b.db"), b"k" * 32)
+    import_vendors(store, "name,bank account\nOld Co,US0001112223334\n")
+    assert store.vendor("V-OLDCO").created_on == d(2000, 1, 1)  # first load: long-standing vendors
+    import_vendors(store, "name,bank account\nNew Co,US0005556667778\n")
+    assert store.vendor("V-NEWCO").created_on == d.today()  # added later: new, so new-vendor checks apply

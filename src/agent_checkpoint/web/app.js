@@ -454,6 +454,7 @@
     fact("Purchase order", t.po_number || (t.action === "pay" ? "None" : ""));
     fact("Asked by", t.requested_by ? t.requested_by.identity : "Nobody recorded");
     fact("Account on file", t.account_on_file);
+    fact("Pays to", t.action === "refund" ? t.pays_to : "");
     fact("Account on the invoice", t.account_on_invoice, t.account_on_invoice && t.account_on_invoice !== t.account_on_file ? "differs" : "");
     fact("New account requested", t.new_account, "differs");
     fact("Evidence", t.evidence.map((e) => e.ref + (e.sender ? " from " + e.sender : "")).join(", "));
@@ -467,11 +468,15 @@
     const approve = h("button", { type: "button" }, verb);
     const reject = h("button", { type: "button", class: "danger" }, "Reject");
     const fraud = h("button", { type: "button", class: "link" }, "Reject and report as fraud");
-    let called = null;
+    let called = null, dialled = null;
+    const digits = (s) => (s || "").replace(/\D/g, "");
+    const ready = () => !!(called && called.checked && digits(dialled.value) && digits(dialled.value) === digits(t.phone_on_file));
     if (t.action === "change_bank") {
       called = h("input", { type: "checkbox", id: "called-" + t.ticket_id });
+      dialled = h("input", { type: "tel", id: "dialled-" + t.ticket_id, autocomplete: "off", inputmode: "tel" });
       approve.disabled = true;
-      called.addEventListener("change", () => { approve.disabled = !called.checked; });
+      for (const el of [called, dialled]) el.addEventListener("input", () => { approve.disabled = !ready(); });
+      called.addEventListener("change", () => { approve.disabled = !ready(); });
     }
 
     async function decide(isApprove, isFraud) {
@@ -479,15 +484,17 @@
       for (const b of [approve, reject, fraud]) b.disabled = true;
       try {
         const out = await api.post("tickets/" + t.ticket_id, {
-          approve: isApprove, note: note.value, callback_verified: !!(called && called.checked), fraud: !!isFraud,
+          approve: isApprove, note: note.value, callback_verified: !!(called && called.checked),
+          called_number: dialled ? dialled.value : "", fraud: !!isFraud,
         });
         let message;
         if (out.status === "open") message = "Approved. One more person needs to approve.";
         else if (out.status === "approved") message = { pay: "Payment approved", change_bank: "Bank change approved", refund: "Refund approved", edit_record: "Edit approved" }[t.action];
+        else if (out.reopened) message = "Not paid yet: something new came up, so it needs approving again. " + (out.reasons || []).join(" ");
         else if (out.status === "blocked_on_recheck") message = "Not approved: something changed since it was paused. " + (out.reasons || []).join(" ");
         else message = isFraud ? "Rejected and reported as fraud" : "Rejected";
         toast(message);
-        if (out.status === "open") return render();
+        if (out.status === "open" || out.reopened) return render();
         li.classList.add("leaving");
         setTimeout(() => {
           li.remove();
@@ -502,7 +509,7 @@
         status.textContent = e.message;
         status.hidden = false;
         for (const b of [approve, reject, fraud]) b.disabled = false;
-        if (called) approve.disabled = !called.checked;
+        if (called) approve.disabled = !ready();
       }
     }
     approve.addEventListener("click", () => decide(true, false));
@@ -520,6 +527,7 @@
         canDecide ? [
           called ? h("label", { class: "check", for: called.id }, called,
             h("span", { text: "I called the vendor on " + (t.phone_on_file || "the number on file") + " and they confirmed the new account." })) : null,
+          dialled ? h("div", {}, h("label", { for: dialled.id, text: "Number you called (must match the number on file, not one from the request)" }), dialled) : null,
           h("div", {}, h("label", { for: note.id, text: "Note (optional, saved in the audit log)" }), note),
           h("div", { class: "stub-actions" }, approve, reject, h("span", { class: "spacer" }), fraud),
           status,
@@ -618,8 +626,43 @@
   }
 
   // ---------- audit ----------
+  function saveFile(text, type, file) {
+    if (window.CHECKPOINT_DEMO_NO_DOWNLOADS) return toast("Downloads are turned off in this shared demo.");
+    const url = URL.createObjectURL(new Blob([text], { type }));
+    const a = h("a", { href: url, download: file });
+    document.body.append(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  function evidencePanel(ev) {
+    const pct = (v) => v === null || v === undefined ? "not enough data yet" : v + "%";
+    const rows = [
+      ["Payment files checked", ev.payment_files + " (" + count(ev.lines_checked, "line", "lines") + ")"],
+      ["Held for review", ev.lines_held + " (" + ev.held_pct + "%)"],
+      ["Held lines that were real problems", ev.held_and_real + " of " + ev.held_lines_reviewed + " with an outcome (" + pct(ev.precision_pct) + ")"],
+      ["Fraud that got through", ev.misses_recorded + " recorded (" + money(ev.missed_cents) + "), miss rate " + pct(ev.fraud_miss_rate_pct)],
+      ["Releases signed", ev.usage.releases_issued + " (" + money(ev.usage.released_cents) + " released)"],
+    ];
+    const list = h("button", { type: "button", class: "secondary" }, "Download allowed-accounts list (signed)");
+    list.addEventListener("click", async () => {
+      try {
+        const doc = await api.post("allowed-accounts", {});
+        saveFile(JSON.stringify(doc, null, 2) + "\n", "application/json", doc.body.list_id + ".json");
+        toast("Allowed-accounts list version " + doc.body.version + " signed");
+      } catch (e) { toast(e.message); }
+    });
+    const key = h("button", { type: "button", class: "secondary" }, "Download public key");
+    key.addEventListener("click", () => saveFile(ev.public_key, "application/x-pem-file", "checkpoint-public-key.pem"));
+    return h("div", { class: "panel" },
+      h("h2", { text: "For your bank and insurer" }),
+      h("p", { class: "small muted", text: "A bank or payment system can check a signed release or the allowed-accounts list with the public key alone. It is a control only once their system is set to refuse payments without it." }),
+      h("table", { class: "statement facts-long" }, h("tbody", {}, rows.map(([k, v]) => h("tr", {}, h("td", { text: k }), h("td", { class: "num", text: v }))))),
+      ev.caveats.length ? h("ul", { class: "small muted" }, ev.caveats.map((c) => h("li", { text: c }))) : null,
+      h("div", { class: "row" }, state.me.role !== "auditor" ? list : null, key));
+  }
+
   async function renderAudit() {
-    const a = await api.get("audit");
+    const [a, ev] = await Promise.all([api.get("audit"), api.get("evidence")]);
     return [
       h("h1", { text: "Audit log" }),
       h("p", { class: "lede", text: "Every request, decision, approval and payment is written here in order. Each entry is chained to the one before it and signed, so any later change is detected." }),
@@ -629,6 +672,7 @@
         h("h2", { text: "Latest entry fingerprint" }),
         h("p", { class: "small muted", text: "Send this to your auditor or keep it somewhere outside this system. If entries are ever removed, comparing with it shows it." }),
         h("p", { class: "code", text: "Entry " + a.head.seq + ": " + a.head.hash })),
+      evidencePanel(ev),
       h("div", { class: "table-wrap" }, h("table", { class: "data" },
         h("thead", {}, h("tr", {}, ["#", "Time", "What happened", "Request"].map((x) => h("th", { scope: "col", text: x })))),
         h("tbody", {}, a.recent.map((e) => h("tr", {},
@@ -1010,21 +1054,43 @@
         [x.line, x.vendor_name, x.invoice_number, (x.amount_cents / 100).toFixed(2), RUN[x.verdict], x.reasons.join("; ")]));
       return lines.map((l) => l.map(cell).join(",")).join("\n");
     };
-    const dl = h("button", { type: "button", class: "secondary" }, "Download results (CSV)");
-    dl.addEventListener("click", () => {
+    const save = (text, type, file) => {
       if (window.CHECKPOINT_DEMO_NO_DOWNLOADS) return toast("Downloads are turned off in this shared demo.");
-      const url = URL.createObjectURL(new Blob([csv()], { type: "text/csv" }));
-      const a = h("a", { href: url, download: "payment-run-checked.csv" });
+      const url = URL.createObjectURL(new Blob([text], { type }));
+      const a = h("a", { href: url, download: file });
       document.body.append(a); a.click(); a.remove();
       setTimeout(() => URL.revokeObjectURL(url), 1000);
+    };
+    const dl = h("button", { type: "button", class: "secondary" }, "Download results (CSV)");
+    dl.addEventListener("click", () => save(csv(), "text/csv", "payment-run-checked.csv"));
+    const ready = sum.go.count;
+    const canRelease = r.run_id && ready > 0 && state.me && state.me.role !== "auditor";
+    const rel = canRelease ? h("button", { type: "button" }, "Sign release for " + count(ready, "ready line", "ready lines")) : null;
+    const relNote = h("p", { class: "muted", hidden: true });
+    if (rel) rel.addEventListener("click", async () => {
+      rel.disabled = true;
+      try {
+        const doc = await api.post("payment-run/" + r.run_id + "/release", {});
+        save(JSON.stringify(doc, null, 2) + "\n", "application/json", r.run_id + "-release.json");
+        relNote.textContent = "Signed. Send the release with the file to whoever releases payments. If their system checks it, "
+          + "only the ready lines go, and only to the accounts on file. Held lines stay held.";
+        relNote.hidden = false;
+        rel.textContent = "Release signed";
+      } catch (e) { toast(e.message); rel.disabled = false; }
     });
+    const p = r.pilot;
+    const fit = p ? h("p", { class: p.over_limit ? "notice error" : "muted",
+      text: p.not_ready + " of " + p.lines + " lines are not ready (" + p.not_ready_pct + "%)."
+        + (p.over_limit ? " That's over " + p.limit_pct + "%: on an ordinary file, the checks don't fit these books yet. "
+          + "Look at what's being held before relying on it." : "") }) : null;
     return [
       h("div", { class: "panel" },
         h("p", { class: "big-sentence", text: "Checked " + count(r.rows.length, "payment", "payments") + " in " + name + "." }),
         h("table", { class: "statement" }, h("tbody", {}, ["go", "pause", "block"].map((v) => h("tr", {},
           h("td", {}, runTag(v)), h("td", { class: "num", text: String(sum[v].count) }), h("td", { class: "num", text: money(sum[v].amount_cents) }))))),
+        fit,
         r.errors && r.errors.length ? h("p", { class: "notice error", text: "Rows that couldn't be read: " + r.errors.join("; ") }) : null,
-        h("div", { class: "row" }, dl)),
+        h("div", { class: "row" }, rel, dl), relNote),
       h("div", { class: "table-wrap" }, h("table", { class: "data" },
         h("thead", {}, h("tr", {}, ["Line", "Vendor", "Invoice", "Amount", "Decision", "Why"].map((x, i) =>
           h("th", { scope: "col", class: i === 3 ? "num" : false, text: x })))),

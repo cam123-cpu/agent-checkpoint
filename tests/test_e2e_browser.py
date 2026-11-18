@@ -95,6 +95,10 @@ def test_bank_change_needs_the_phone_call_box(site, browser):
     approve = slip.get_by_role("button", name="Approve bank change")
     assert approve.is_disabled()
     slip.get_by_label("I called the vendor").check()
+    assert approve.is_disabled()  # still needs the number that was dialled
+    slip.get_by_label("Number you called").fill("+1 555 9999")  # a number from the request, not the one on file
+    assert approve.is_disabled()
+    slip.get_by_label("Number you called").fill("+1 (555) 0100")
     assert approve.is_enabled()
 
 

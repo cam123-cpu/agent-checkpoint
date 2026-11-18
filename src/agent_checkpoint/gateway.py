@@ -26,13 +26,15 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from .checks import Context, _sender_strings, domain_of, evaluate, learned_weights
-from .intel import Intel
+from .intel import Intel, shared_domain
 from .ledger import Ledger
 from .models import RANK, ActionRequest, Decision, Finding, Verdict, money
 from .notify import Notifier
 from .policy import Policy
 from .rails import Rail
 from .receipts import ReceiptError, Signer
+from .release import account_tag
+from .release import sign as sign_doc
 from .store import Payment, Store, last4, norm_account, norm_invoice
 
 
@@ -82,6 +84,20 @@ def masked_request(req: dict, crypto) -> dict:
         if e.get("excerpt"):
             e["excerpt"] = _ACCOUNTISH.sub(lambda m: f"[account {last4(m.group(0))}]", e["excerpt"])
     return d
+
+
+def pilot_measure(summary: dict, limit_pct: float) -> dict:
+    """The number that decides a pilot: how much of an ordinary file was held. Over the limit, people stop
+    working the queue, and the checks don't fit their books."""
+    total = sum(v["count"] for v in summary.values())
+    held = summary["pause"]["count"] + summary["block"]["count"]
+    pct = round(100 * held / total, 1) if total else 0.0
+    return {"lines": total, "not_ready": held, "not_ready_pct": pct, "limit_pct": limit_pct,
+            "over_limit": pct > limit_pct}
+
+
+def _digits(phone: str) -> str:
+    return "".join(ch for ch in (phone or "") if ch.isdigit())
 
 
 def _run_row(row: dict) -> dict:
@@ -184,6 +200,9 @@ class Gateway:
                     raw["po_number"] = row["po_number"]
                 if row.get("bank_account"):
                     raw["bank_account_on_invoice"] = row["bank_account"]
+                # No currency column: the file is in the company's currency. A column names it per line, and an
+                # amount in another currency is never converted: it's held.
+                raw["currency"] = row.get("currency") or org.policy.currency
                 try:
                     req = ActionRequest.from_dict(raw, agent_id="payment-run", on=now.date())
                 except ValueError as exc:
@@ -191,6 +210,12 @@ class Gateway:
                     continue
                 ctx = Context(org.store, org.policy, now, org.intel, org.org_id, weights=weights, actor="run")
                 verdict, risk, findings = evaluate(req, ctx)
+                if row.get("invoice_missing"):
+                    findings = list(findings) + [Finding("no_invoice_number", Verdict.PAUSE,
+                                                         "No invoice number on this line, so a duplicate can't be "
+                                                         "caught. Add it, or check by hand.", 0.4)]
+                    if verdict is Verdict.GO:
+                        verdict = Verdict.PAUSE
                 results.append({**_run_row(row), "verdict": verdict.value, "risk": risk,
                                 "reasons": [f.message for f in sorted(findings, key=lambda f: -RANK[f.verdict])]})
                 if verdict is not Verdict.BLOCK:
@@ -204,12 +229,117 @@ class Gateway:
                    for v in ("go", "pause", "block")}
         order = {"block": 0, "pause": 1, "go": 2}
         shown = sorted(results, key=lambda r: (order[r["verdict"]], -r["risk"], r["line"]))
-        org.ledger.append("payment_run_checked", "-", {
-            "by": person, "file_sha256": file_sha256, "rows": len(rows), "summary": summary,
+        pilot = pilot_measure(summary, org.policy.pilot_hold_limit_pct)
+        run_id = f"run-{now.strftime('%Y%m%dT%H%M%S')}-{file_sha256[:10]}"
+        org.ledger.append("payment_run_checked", run_id, {
+            "run_id": run_id, "by": person, "checked_at": now.isoformat(), "file_sha256": file_sha256,
+            "rows": len(rows), "summary": summary,
+            "not_ready_pct": pilot["not_ready_pct"],
             "lines": [{k: r[k] for k in ("line", "vendor_id", "vendor_name", "invoice_number", "amount_cents",
                                          "account_in_file", "verdict", "risk", "reasons")} for r in shown],
         })
-        return {"rows": shown, "summary": summary}
+        return {"run_id": run_id, "rows": shown, "summary": summary, "pilot": pilot}
+
+    # --- in the path: documents a payment system can check -------------------------------
+
+    def release_run(self, run_id: str, person: str) -> dict:
+        """Sign which lines of a checked payment file may be released, and where each may go.
+
+        Only lines that were Ready are released. The file is named by its SHA-256, so a changed file has no
+        release. A release is issued at most once per run and expires after policy.release_hours.
+        """
+        org, now = self.org, self.clock()
+        if person not in org.policy.approvers:
+            raise CheckpointError(403, "only approvers can release a payment file")
+        run = org.ledger.find(run_id, "payment_run_checked")
+        if run is None:
+            raise CheckpointError(404, "no such payment run")
+        if org.ledger.find(run_id, "release_issued"):
+            raise CheckpointError(409, "this payment run was already released. Check the file again for a new one.")
+        checked_at = datetime.fromisoformat(run["checked_at"])
+        if now - checked_at > timedelta(hours=org.policy.release_hours):
+            raise CheckpointError(409, f"this check is more than {org.policy.release_hours} hours old. Check the "
+                                       "file again: the books may have changed.")
+        salt = uuid.uuid4().hex
+        release, hold = [], []
+        for line in sorted(run["lines"], key=lambda r: r["line"]):
+            vendor = org.store.vendor(line["vendor_id"])
+            if line["verdict"] != "go" or vendor is None:
+                hold.append(line["line"])
+                continue
+            release.append({"line": line["line"], "vendor_id": line["vendor_id"], "invoice_number": line["invoice_number"],
+                            "amount_cents": line["amount_cents"], "account_tag": account_tag(salt, vendor.bank_account),
+                            "account_last4": last4(vendor.bank_account)})
+        body = {"release_id": "RL-" + uuid.uuid4().hex, "org_id": org.org_id, "company": org.name, "run_id": run_id,
+                "file_sha256": run["file_sha256"], "checked_at": checked_at.isoformat(), "issued_at": now.isoformat(),
+                "expires_at": (now + timedelta(hours=org.policy.release_hours)).isoformat(), "issued_by": person,
+                "currency": org.policy.currency, "salt": salt, "release": release, "hold": hold,
+                "released_cents": sum(r["amount_cents"] for r in release),
+                "held_cents": sum(r["amount_cents"] for r in run["lines"] if r["line"] in set(hold))}
+        doc = sign_doc(org.signer, "release", body)
+        org.ledger.append("release_issued", run_id, {
+            "release_id": body["release_id"], "by": person, "file_sha256": body["file_sha256"],
+            "released": len(release), "released_cents": body["released_cents"], "held": len(hold),
+            "held_cents": body["held_cents"], "doc_sha256": doc["sha256"]})
+        return doc
+
+    def allowed_accounts(self, person: str) -> dict:
+        """The locked list of where this company pays, signed, for a bank or payment system to check against.
+
+        Every account on it was set by an import before go-live or by a bank change that a second person
+        approved after calling the number on file. Versions only go up; a partner keeps the newest it has seen.
+        """
+        org, now = self.org, self.clock()
+        if person not in org.policy.approvers:
+            raise CheckpointError(403, "only approvers can issue the allowed-accounts list")
+        version = len(org.ledger.entries("allowed_accounts_issued")) + 1
+        salt = uuid.uuid4().hex
+        accounts = [{"vendor_id": v.vendor_id, "vendor_name": v.name, "account_tag": account_tag(salt, v.bank_account),
+                     "account_last4": last4(v.bank_account)} for v in org.store.vendors() if norm_account(v.bank_account)]
+        body = {"list_id": f"AL-{org.org_id}-{version}", "org_id": org.org_id, "company": org.name, "version": version,
+                "issued_at": now.isoformat(), "issued_by": person,
+                "expires_at": (now + timedelta(days=org.policy.allowed_list_days)).isoformat(),
+                "salt": salt, "accounts": accounts}
+        doc = sign_doc(org.signer, "allowed_accounts", body)
+        org.ledger.append("allowed_accounts_issued", body["list_id"], {
+            "version": version, "by": person, "accounts": len(accounts), "doc_sha256": doc["sha256"]})
+        return doc
+
+    # --- outcomes: what actually happened, for the miss rate -----------------------------
+
+    OUTCOMES = ("fraud", "error", "fine")
+
+    def mark_line(self, run_id: str, line: int, outcome: str, person: str, note: str = "") -> dict:
+        """After the fact: was a held line really fraud, a real mistake (duplicate, wrong amount), or fine?"""
+        if outcome not in self.OUTCOMES:
+            raise CheckpointError(422, "outcome must be fraud, error or fine")
+        run = self.org.ledger.find(run_id, "payment_run_checked")
+        if run is None:
+            raise CheckpointError(404, "no such payment run")
+        match = [r for r in run["lines"] if r["line"] == line]
+        if not match:
+            raise CheckpointError(404, f"line {line} is not in that payment run")
+        entry = {"run_id": run_id, "line": line, "verdict": match[0]["verdict"], "outcome": outcome,
+                 "amount_cents": match[0]["amount_cents"], "by": person, "note": note[:500]}
+        self.org.ledger.append("line_outcome", run_id, entry)
+        return entry
+
+    def report_miss(self, person: str, amount_cents: int, vendor_id: str = "", run_id: str = "", line: int = 0,
+                    note: str = "") -> dict:
+        """Money that was lost or nearly lost and the checkpoint said Ready, or never saw. This is the number an
+        insurer asks for first; it only means something if misses are recorded as faithfully as catches."""
+        if amount_cents <= 0:
+            raise CheckpointError(422, "amount must be positive")
+        verdict = ""
+        if run_id:
+            run = self.org.ledger.find(run_id, "payment_run_checked")
+            if run is None:
+                raise CheckpointError(404, "no such payment run")
+            verdict = next((r["verdict"] for r in run["lines"] if r["line"] == line), "")
+        entry = {"by": person, "amount_cents": amount_cents, "vendor_id": vendor_id[:64], "run_id": run_id,
+                 "line": line, "verdict_given": verdict or "not checked", "note": note[:500]}
+        self.org.ledger.append("miss_reported", run_id or "-", entry)
+        return entry
 
     def status(self, request_id: str, agent_id: str | None = None) -> dict:
         previous = self.org.ledger.find(request_id, "decision")
@@ -241,7 +371,7 @@ class Gateway:
     # --- humans -----------------------------------------------------------------------
 
     def resolve(self, ticket_id: str, approver: str, approve: bool, note: str = "", *,
-                callback_verified: bool = False, fraud: bool = False) -> dict:
+                callback_verified: bool = False, fraud: bool = False, called_number: str = "") -> dict:
         org, now = self.org, self.clock()
         with org.store.tx():
             t = org.store.ticket(ticket_id)
@@ -260,18 +390,30 @@ class Gateway:
                 raise CheckpointError(409, "ticket has expired")
             approvals = list(t["approvals"])
             if approve:
-                if req.action == "change_bank" and not callback_verified:
-                    raise CheckpointError(422, "bank changes need callback_verified: confirm by phone with "
-                                               "the number on file first")
+                if req.action == "change_bank":
+                    vendor = org.store.vendor(req.vendor_id)
+                    on_file = _digits(vendor.phone if vendor else "")
+                    if not callback_verified:
+                        raise CheckpointError(422, "bank changes need callback_verified: confirm by phone with "
+                                                   "the number on file first")
+                    if not on_file:
+                        raise CheckpointError(422, "This vendor has no phone number on file, so the change can't be "
+                                                   "confirmed. Add one first (a second person approves it).")
+                    if _digits(called_number) != on_file:
+                        raise CheckpointError(422, "Enter the number you called. It must be the number on file, not "
+                                                   "one from the request.")
                 if any(a["by"] == approver for a in approvals):
                     raise CheckpointError(409, "you have already approved this; a second approver is needed")
                 approvals.append({"by": approver, "at": now.isoformat(), "note": note[:500],
-                                  "callback_verified": callback_verified})
+                                  "callback_verified": callback_verified,
+                                  "called_number": _digits(called_number) if req.action == "change_bank" else ""})
                 status = "approved" if len(approvals) >= t["needed"] else "open"
             else:
                 status = "rejected"
             entry = {"ticket_id": ticket_id, "approver": approver, "approve": approve, "status": status,
                      "note": note[:500], "fraud": fraud, "callback_verified": callback_verified}
+            if approve and req.action == "change_bank":
+                entry["called_number"] = _digits(called_number)
 
             if status == "approved":
                 # Re-check: anything that changed since the pause and now blocks wins.
@@ -281,22 +423,30 @@ class Gateway:
                 verdict, _, findings = evaluate(req, ctx)
                 new_blocks = [f for f in findings if f.verdict is Verdict.BLOCK]
                 if t.get("payee_fp") and t["payee_fp"] != self._payee_fp(req):
-                    vendor = org.store.vendor(req.vendor_id)
                     new_blocks.append(Finding("payee_changed", Verdict.BLOCK,
-                                              f"The bank account for {vendor.name if vendor else req.vendor_id} changed "
-                                              f"after this was paused (now {last4(vendor.bank_account) if vendor else '?'}). "
-                                              "Nothing was paid; review it again as a new request.", 1.0))
+                                              f"The account this would be paid to changed after it was paused (now "
+                                              f"{last4(self._payee(req)) or 'none'}), so it isn't the one you were "
+                                              "shown. Nothing was paid; review it again as a new request.", 1.0))
+                seen = {f["check"] for f in t["findings"]}
+                new_pauses = [f for f in findings if f.verdict is Verdict.PAUSE and f.check not in seen]
                 if new_blocks:
                     status = "blocked_on_recheck"
                     entry.update(status=status, recheck=[f.message for f in new_blocks])
+                elif new_pauses:
+                    # Something new needs a look (a split the earlier approval couldn't see, a daily cap...).
+                    # Approvals so far were given without it, so they're cleared and the ticket stays open.
+                    status, approvals = "open", []
+                    org.store.set_ticket_findings(ticket_id, t["findings"] + self._rows(new_pauses))
+                    entry.update(status="reopened", recheck=[f.message for f in new_pauses])
             org.store.update_ticket(ticket_id, status=status, approvals=approvals,
                                     closed_by=approver if status != "open" else None, note=note[:500], fraud=fraud)
             org.ledger.append("human_decision", req.request_id, entry)
             result = {"ticket_id": ticket_id, "status": status, "approvals": len(approvals), "needed": t["needed"]}
             if status == "approved":
                 result["execution"], result["transfer_id"] = self._execute(req, [a["by"] for a in approvals], now)
-            if status == "blocked_on_recheck":
+            if status == "blocked_on_recheck" or entry.get("status") == "reopened":
                 result["reasons"] = entry["recheck"]
+                result["reopened"] = entry.get("status") == "reopened"
             if fraud and not approve:
                 self._report_fraud(req)
         return result
@@ -312,21 +462,43 @@ class Gateway:
         self._report_fraud(req)
         self.org.ledger.append("fraud_report", request_id, {"by": reporter})
 
+    def _reportable(self, req: ActionRequest) -> tuple[set[str], set[str]]:
+        """What a fraud report on this request would list: only what the fraudster supplied."""
+        vendor = self.org.store.vendor(req.vendor_id)
+        on_file = norm_account(vendor.bank_account) if vendor else ""
+        accounts = {a for a in {req.bank_account, req.bank_account_on_invoice} - {""}
+                    if norm_account(a) != on_file or req.action == "change_bank"}
+        # Only the address each message really came from, never the vendor's or our own domains, and never a
+        # free-mail domain: a report must not put a real company (or ourselves, or gmail.com) on the list.
+        protected = set(vendor.email_domains if vendor else ()) | set(self.org.policy.internal_domains)
+        domains = {d for d in {domain_of(s) for s in _sender_strings(req)} - protected - {""} if not shared_domain(d)}
+        return accounts, domains
+
     def _report_fraud(self, req: ActionRequest) -> None:
         if self.org.intel is None:
             return
-        vendor = self.org.store.vendor(req.vendor_id)
-        on_file = norm_account(vendor.bank_account) if vendor else ""
-        # Only what the fraudster supplied: never the vendor's real account or real domain.
-        accounts = {req.bank_account, req.bank_account_on_invoice} - {""}
+        accounts, domains = self._reportable(req)
         for acct in accounts:
-            if norm_account(acct) != on_file or req.action == "change_bank":
-                self.org.intel.report(self.org.org_id, account=acct)
-        # Only the address each message really came from, and never the vendor's or our own domains: a report
-        # must not put a real company (or ourselves) on everyone's block list.
-        protected = set(vendor.email_domains if vendor else ()) | set(self.org.policy.internal_domains)
-        for d in {domain_of(s) for s in _sender_strings(req)} - protected - {""}:
+            self.org.intel.report(self.org.org_id, account=acct)
+        for d in domains:
             self.org.intel.report(self.org.org_id, domain=d)
+
+    def withdraw_report(self, request_id: str, person: str, reason: str = "") -> dict:
+        """Take back this company's fraud report for a request (it was the real vendor after all)."""
+        if person not in self.org.policy.approvers:
+            raise CheckpointError(403, "only approvers can withdraw a fraud report")
+        stored = self.org.store.get_request(request_id)
+        if stored is None or self.org.intel is None:
+            raise CheckpointError(404, "no such request")
+        req = ActionRequest.from_stored(stored)
+        accounts, domains = self._reportable(req)
+        n = sum(self.org.intel.withdraw(self.org.org_id, account=a) for a in accounts)
+        n += sum(self.org.intel.withdraw(self.org.org_id, domain=d) for d in domains)
+        if not n:
+            raise CheckpointError(404, "this company has no fraud report for that request")
+        self.org.ledger.append("fraud_report_withdrawn", request_id, {"by": person, "reason": reason[:500],
+                                                                      "entries": n})
+        return {"request_id": request_id, "withdrawn": n}
 
     def expire(self) -> list[str]:
         now, done = self.clock(), []
@@ -341,12 +513,21 @@ class Gateway:
 
     # --- doing it ---------------------------------------------------------------------
 
+    def _payee(self, req: ActionRequest) -> str:
+        """Where money for this action would go right now. Payments: the account on file. Refunds: the account
+        the original payment used. This is what the approver is shown, and what is paid."""
+        if req.action == "pay":
+            vendor = self.org.store.vendor(req.vendor_id)
+            return vendor.bank_account if vendor else ""
+        if req.action == "refund":
+            key = norm_invoice(req.invoice_number)
+            originals = [p for p in self.org.store.payments(req.vendor_id, "pay") if p.invoice_key == key]
+            return originals[0].bank_account if originals else req.bank_account
+        return ""
+
     def _payee_fp(self, req: ActionRequest) -> str:
-        """Fingerprint of where a payment would go right now: what the approver is shown."""
-        if req.action != "pay":
-            return ""
-        vendor = self.org.store.vendor(req.vendor_id)
-        return self.org.store.crypto.fingerprint(norm_account(vendor.bank_account)) if vendor else ""
+        payee = self._payee(req)
+        return self.org.store.crypto.fingerprint(norm_account(payee)) if payee else ""
 
     @staticmethod
     def _rows(findings) -> list[dict]:
@@ -361,11 +542,7 @@ class Gateway:
         key = norm_invoice(req.invoice_number)
         transfer_id = None
         if req.action in ("pay", "refund"):
-            if req.action == "pay":
-                payee = vendor.bank_account if vendor else req.bank_account_on_invoice
-            else:
-                originals = [p for p in store.payments(req.vendor_id, "pay") if p.invoice_key == key]
-                payee = originals[0].bank_account if originals else req.bank_account
+            payee = self._payee(req) or req.bank_account_on_invoice
             if not shadow:
                 receipt = org.signer.issue(request_id=req.request_id, action=req.action, vendor_id=req.vendor_id,
                                            amount_cents=req.amount_cents, payee_account=payee, invoice_key=key,

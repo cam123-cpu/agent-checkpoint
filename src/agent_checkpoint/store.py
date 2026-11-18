@@ -298,6 +298,9 @@ class Store:
         self.q("UPDATE tickets SET status = ?, approvals = ?, closed_by = ?, note = ?, fraud = ? WHERE ticket_id = ?",
                (status, json.dumps(approvals), closed_by, note, int(fraud), ticket_id))
 
+    def set_ticket_findings(self, ticket_id: str, findings: list[dict]) -> None:
+        self.q("UPDATE tickets SET findings = ? WHERE ticket_id = ?", (json.dumps(findings), ticket_id))
+
     def open_ticket_for_invoice(self, vendor_id: str, invoice_key: str) -> dict | None:
         for t in self.tickets("open"):
             r = t["request"]
