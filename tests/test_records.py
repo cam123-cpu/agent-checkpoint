@@ -7,7 +7,7 @@ from dataclasses import replace
 from datetime import date
 
 import pytest
-from test_web_security import PW, Client
+from test_web_security import PW, Client, register
 
 from agent_checkpoint.importers import import_history, import_vendors, map_headers, parse_date, read_payment_run
 from agent_checkpoint.server import ServerConfig, make_server
@@ -31,7 +31,7 @@ def site(tmp_path):
     gw.org.store.upsert_vendor(Vendor("V1", "Northwind Supplies", ACCT, ("northwind.com",), date(2024, 1, 1), phone="+1 555"))
     gw.org.store.upsert_vendor(Vendor("V2", "Contoso", "US0009999000111", ("contoso.com",), date(2024, 1, 1)))
     gw.org.store.upsert_po(PurchaseOrder("PO-1", "V1", 50_000_00))
-    srv = make_server(reg, "127.0.0.1", 0, ServerConfig(secure_cookies=False))
+    srv = register(make_server(reg, "127.0.0.1", 0, ServerConfig(secure_cookies=False)), reg)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     port = srv.server_address[1]
 

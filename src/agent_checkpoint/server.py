@@ -309,10 +309,15 @@ def make_server(registry: Registry, host: str = "127.0.0.1", port: int = 8077, c
                 loaded = sso_config(org)
                 if not loaded:
                     raise SSOError("not_configured")
-                email = oidc.finish(loaded[0], loaded[1], redirect_uri, qp("code", ""), verifier, nonce)
+                email, mfa = oidc.finish_with_mfa(loaded[0], loaded[1], redirect_uri, qp("code", ""), verifier, nonce)
                 user = accounts.user(email)
                 if user is None or user.org_id != org:
                     raise SSOError("no_account", email)
+                # Admins always, and everyone in a company that requires two-step, need a provider that proves a
+                # second factor. Otherwise single sign-on would be a way around the authenticator code.
+                needs_mfa = user.role == "admin" or registry.gateway(org).org.policy.require_two_step
+                if needs_mfa and not mfa:
+                    raise SSOError("needs_mfa", email)
                 token, user = accounts.sso_session(email)
                 registry.gateway(org).org.ledger.append("account", "-", {"by": email, "event": "signed in with SSO"})
             except SSOError as exc:

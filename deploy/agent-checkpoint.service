@@ -1,0 +1,44 @@
+# systemd unit for the checkpoint, installed by deploy/install.sh.
+# It runs as its own user, can write only its data and keys folders, and has no capabilities.
+[Unit]
+Description=Agent Checkpoint
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=checkpoint
+Group=checkpoint
+EnvironmentFile=/etc/agent-checkpoint/env
+ExecStart=/opt/agent-checkpoint/venv/bin/agent-checkpoint serve --host 127.0.0.1 --port 8077 --force-https \
+    --public-origin ${PUBLIC_ORIGIN} --trusted-proxy 127.0.0.1
+Restart=on-failure
+RestartSec=3
+UMask=0077
+
+# Sandbox
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ReadWritePaths=/srv/checkpoint /etc/agent-checkpoint/keys
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+
+[Install]
+WantedBy=multi-user.target

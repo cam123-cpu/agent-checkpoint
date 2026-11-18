@@ -43,6 +43,11 @@ MULTI_TENANT = {"common", "organizations", "consumers"}
 SKEW = 120  # seconds of clock difference tolerated
 
 
+# RFC 8176 methods that are a second factor (or a factor beyond a password). Microsoft sends "mfa" when the
+# sign-in used one. Google usually sends no amr at all.
+MFA_METHODS = frozenset({"mfa", "otp", "hwk", "swk", "sc", "fpt", "face", "iris", "retina", "vbm", "pop"})
+
+
 class SSOError(Exception):
     """`code` is one of a fixed set, so nothing from the request is ever shown back to the person."""
 
@@ -52,6 +57,8 @@ class SSOError(Exception):
         "provider": "The sign-in provider didn't complete the sign-in. Start again.",
         "token": "The sign-in couldn't be verified. Start again, or ask an admin to check the SSO settings.",
         "no_account": "Your company account isn't set up in Checkpoint yet. Ask an admin to add you.",
+        "needs_mfa": "Your sign-in provider didn't confirm a second factor, which this account needs. Sign in with "
+                     "your password and authenticator code instead, or turn on MFA with your provider.",
         "domain": "That account isn't from your company's domain.",
     }
 
@@ -180,6 +187,11 @@ class OIDC:
 
     def finish(self, cfg: SSOConfig, secret: str, redirect_uri: str, code: str, verifier: str, nonce: str) -> str:
         """Swap the code for an ID token, verify it, and return the person's verified email."""
+        return self.finish_with_mfa(cfg, secret, redirect_uri, code, verifier, nonce)[0]
+
+    def finish_with_mfa(self, cfg: SSOConfig, secret: str, redirect_uri: str, code: str, verifier: str,
+                        nonce: str) -> tuple[str, bool]:
+        """As finish, plus whether the token shows a second factor (the `amr` claim, RFC 8176)."""
         d = self.discovery(cfg)
         tokens = self.post_form(d["token_endpoint"], {
             "grant_type": "authorization_code", "code": code, "redirect_uri": redirect_uri,
@@ -188,7 +200,9 @@ class OIDC:
         if not isinstance(id_token, str):
             raise SSOError("provider", "no id_token in the token response")
         claims = self.verify(id_token, cfg, d, nonce)
-        return self.email_from(claims, cfg)
+        amr = claims.get("amr")
+        mfa = isinstance(amr, list) and bool(MFA_METHODS & {str(m).lower() for m in amr})
+        return self.email_from(claims, cfg), mfa
 
     def _key(self, d: dict, kid: str):
         for force in (False, True):  # unknown key id: the provider may have rotated keys

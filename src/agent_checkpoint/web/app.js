@@ -113,6 +113,7 @@
     token: "The sign-in couldn't be verified. Start again, or ask an admin to check the SSO settings.",
     no_account: "Your company account isn't set up in Checkpoint yet. Ask an admin to add you.",
     domain: "That account isn't from your company's domain.",
+    needs_mfa: "Your sign-in provider didn't confirm a second factor, which this account needs. Sign in with your password and authenticator code instead, or turn on MFA with your provider.",
   };
 
   // ---------- state and routing ----------
@@ -382,6 +383,7 @@
       const off = h("button", { type: "submit", class: "danger" }, "Turn off two-step sign-in");
       twoStep = h("section", { class: "panel" }, h("h2", { text: "Two-step sign-in" }),
         h("p", { text: "On. " + count(me.recovery_codes_left, "recovery code", "recovery codes") + " left." + (me.recovery_codes_left < 3 ? " Ask an admin to reset two-step sign-in if you run out." : "") }),
+        me.role === "admin" ? h("p", { class: "muted", text: "Admins always use two-step sign-in, so it stays on. If you lose your phone, another admin can reset it." }) :
         me.require_two_step ? h("p", { class: "muted", text: me.company + " requires two-step sign-in, so it stays on." }) :
           h("form", { novalidate: true, onsubmit: async (ev) => {
             ev.preventDefault();

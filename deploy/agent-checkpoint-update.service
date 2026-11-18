@@ -1,0 +1,11 @@
+# Weekly: upgrade the checkpoint's only runtime dependency (cryptography) and check for known
+# vulnerabilities. Operating-system packages, Python, OpenSSL and Caddy are updated daily by
+# unattended-upgrades. The checkpoint's own code is never updated automatically: that's a reviewed release.
+[Unit]
+Description=Agent Checkpoint dependency update
+
+[Service]
+Type=oneshot
+ExecStart=/opt/agent-checkpoint/venv/bin/pip install --quiet --upgrade cryptography pip-audit
+ExecStart=/opt/agent-checkpoint/venv/bin/pip-audit --progress-spinner off --skip-editable
+ExecStartPost=/bin/systemctl try-restart agent-checkpoint.service

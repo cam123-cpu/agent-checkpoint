@@ -24,6 +24,25 @@ PW = "correct-horse-staple-91"
 ACCT_A = "US00021000001234567"
 
 
+# Admins must use two-step sign-in, which can't be repeated quickly in tests (each code works once). Tests that
+# are not about signing in get an admin session as if the code had been entered: the server's port maps to its
+# registry here, and Client.login asks that registry for a full session after the real password check passes.
+# Tests about two-step itself use accounts with an authenticator, or call req() directly.
+SERVED: dict[int, object] = {}
+
+
+def register(srv, reg):
+    SERVED[srv.server_address[1]] = reg
+    return srv
+
+
+def full_admin_session(reg, email: str) -> str:
+    acc = reg.accounts()
+    user = acc.user(email)
+    assert user is not None and user.role == "admin" and not user.two_step
+    return acc._new_session(email, False)
+
+
 class Client:
     def __init__(self, host, port, tls_ctx=None, headers=None):
         self.host, self.port, self.tls_ctx = host, port, tls_ctx
@@ -56,8 +75,15 @@ class Client:
         conn.close()
         return r.status, parsed, r
 
-    def login(self, email, password=PW):
-        return self.req("POST", "/api/web/login", {"email": email, "password": password})
+    def login(self, email, password=PW, *, as_if_two_step=True):
+        out = self.req("POST", "/api/web/login", {"email": email, "password": password})
+        reg = SERVED.get(self.port)
+        if as_if_two_step and reg is not None and out[0] == 200 and out[1].get("signed_in"):
+            user = reg.accounts().user(email)
+            if user is not None and user.role == "admin" and not user.two_step:
+                name = self.cookie.split("=", 1)[0]
+                self.cookie = f"{name}={full_admin_session(reg, email)}"
+        return out
 
 
 @pytest.fixture
@@ -84,7 +110,7 @@ def world(tmp_path):
 
 
 def serve(reg, cfg=None, tls=None):
-    srv = make_server(reg, "127.0.0.1", 0, cfg or ServerConfig(secure_cookies=False), tls)
+    srv = register(make_server(reg, "127.0.0.1", 0, cfg or ServerConfig(secure_cookies=False), tls), reg)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv
 

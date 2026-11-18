@@ -1,20 +1,45 @@
-# Caddy terminates TLS (certificates obtained and renewed automatically) and forwards to the checkpoint.
+# Caddy terminates TLS (certificates obtained and renewed automatically, plain HTTP redirected to
+# HTTPS) and forwards to the checkpoint on 127.0.0.1:8077. deploy/install.sh fills in the domain and
+# email and installs it as /etc/caddy/Caddyfile.
 #
-#   agent-checkpoint serve --host 127.0.0.1 --port 8077 --force-https \
-#       --public-origin https://checkpoint.example.com --trusted-proxy 127.0.0.1
+# Behind Cloudflare (recommended for bot protection, see DEPLOY.md), add to the global block below
+# Cloudflare's current ranges from https://www.cloudflare.com/ips/ so the checkpoint sees each
+# visitor's real address (its sign-in limits are per address):
 #
-# Behind Cloudflare (recommended for bot protection, see DEPLOY.md), uncomment the global block
-# and paste Cloudflare's current ranges from https://www.cloudflare.com/ips/ so the checkpoint sees
-# each visitor's real address (its sign-in limits are per address).
-
-# {
 # 	servers {
 # 		trusted_proxies static <paste Cloudflare IPv4 and IPv6 ranges here>
 # 		client_ip_headers CF-Connecting-IP
 # 	}
-# }
+
+{
+	email you@example.com
+	servers {
+		protocols h1 h2
+	}
+}
 
 checkpoint.example.com {
+	tls {
+		protocols tls1.2 tls1.3
+	}
 	encode zstd gzip
-	reverse_proxy 127.0.0.1:8077
+	header {
+		# The checkpoint sets its own CSP and security headers; these cover Caddy's own responses too.
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options nosniff
+		-Server
+		-Via
+	}
+	request_body {
+		max_size 2MB
+	}
+	reverse_proxy 127.0.0.1:8077 {
+		header_down -Server
+	}
+	log {
+		output file /var/log/caddy/checkpoint-access.log {
+			roll_size 50MiB
+			roll_keep 10
+		}
+	}
 }

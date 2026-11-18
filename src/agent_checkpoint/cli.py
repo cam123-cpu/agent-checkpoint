@@ -361,6 +361,11 @@ def cmd_doctor(args) -> int:
         problems += not ok
         print(f"ok   {org}: mode {gw.org.policy.mode}" if gw.org.policy.mode == "shadow" else
               f"note {org}: mode enforce. Agents' actions are stopped, not only reported.")
+        pending = [u["email"] for u in reg.accounts().users(org) if u["role"] == "admin" and not u["disabled"]
+                   and not u["two_step"]]
+        if pending:
+            print(f"note {org}: admin(s) who haven't set up two-step yet, so they can only set it up: "
+                  + ", ".join(pending))
     return 1 if problems else 0
 
 

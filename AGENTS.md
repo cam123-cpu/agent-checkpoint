@@ -42,6 +42,8 @@ This code decides whether money moves. Read this before changing anything.
 | Fraud reports never include the vendor's or the company's own domains, or free-mail domains | `test_our_own_forwarding_domain_is_never_reported`, `test_free_mail_is_never_listed` |
 | One other company's fraud report only pauses; two or more, or your own, block; a report can be withdrawn | `test_rejected_as_fraud_protects_every_company`, `test_a_report_can_be_withdrawn_and_it_is_logged` |
 | Secrets can live apart from the data, never inside it | `test_move_keys_then_everything_still_opens`, `test_keys_folder_inside_the_data_folder_is_refused` |
+| Admins always need two-step (no turning it off); via SSO only with a second factor in `amr` | `test_admins_always_need_two_step`, `test_admins_need_a_second_factor_at_the_provider` |
+| The deployed server passes deploy/external_check.py | `test_the_server_passes_its_own_outside_check` |
 | A password-only session in a company that requires two-step can only set up two-step | `test_web_flow_end_to_end`, `test_required_two_step_gives_a_limited_session` |
 | Every SQL value is a parameter | `test_sql_is_never_built_from_input` |
 | The web app inserts text only with `textContent`; strict CSP; no third-party code | `tests/test_web_rules.py`, `test_security_headers` |
