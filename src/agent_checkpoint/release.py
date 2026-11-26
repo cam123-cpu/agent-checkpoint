@@ -7,9 +7,10 @@ different signing context so one can never be passed off as the other):
   lines that may be released, the lines that must be held, and where each released line may go. A bank,
   Bill.com, Ramp or an ERP can refuse a file with no valid release, or release only the listed lines.
 
-* **Allowed accounts** (`allowed_accounts`): the company's locked list of vendor accounts. Every change
-  to it went through a second person and a phone call to the number on file. A payment system can refuse
-  any payment to an account that isn't on the latest list, whatever produced the payment.
+* **Allowed accounts** (`allowed_accounts`): the company's list of vendor accounts currently on file.
+  `confirmed_by_call` is true only when that account was set by a bank change a second person approved
+  after the number on file was recorded. An import or a newly added vendor is on the list with that flag
+  false. A payment system can refuse any payment to an account that isn't on the latest list.
 
 Neither document is enforcement by itself. It becomes a control only when the system that releases the
 money is configured to check it. Until a partner does that, this is evidence, not a gate, and nothing in

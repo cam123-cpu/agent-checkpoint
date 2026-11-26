@@ -99,8 +99,9 @@ agent-checkpoint report-miss acme 12000.00 --as cfo@acme.com --note "paid outsid
 ```
 
 A **release** names the checked file by SHA-256 and lists the lines that may go and the accounts they may
-go to; it is single-use and expires. The **allowed-accounts list** is the locked list of where the company
-pays; every change to it went through a second person and a call to the number on file. Both are signed
+go to; it is single-use and expires. The **allowed-accounts list** is every account currently on file.
+`confirmed_by_call` is true only after a bank change that a second person approved and that recorded the
+number on file. An import or a new vendor is on the list with that flag false. Both documents are signed
 with the company's Ed25519 key and carry account tags, not account numbers. They become a control the day a
 partner refuses payments without them. [docs/PARTNER.md](docs/PARTNER.md) is the spec to hand them, and
 [docs/PILOT.md](docs/PILOT.md) is the first-week runbook.

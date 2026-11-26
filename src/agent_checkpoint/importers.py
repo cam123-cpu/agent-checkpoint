@@ -231,8 +231,11 @@ def import_pos(store: Store, text: str) -> tuple[int, list[str]]:
             if existing and po.amount_cents > existing.amount_cents:
                 raise ValueError(f"PO {po.number} would go up from {existing.amount_cents / 100:,.2f}. Raise it in "
                                  "the purchasing system and have it approved there, not by importing a file")
+            if existing and po.billed_cents > existing.billed_cents:
+                raise ValueError(f"PO {po.number}: a file can't raise how much is already billed. That would shrink "
+                                 "what is left to pay without anyone approving it")
             if existing:
-                po = PurchaseOrder(po.number, po.vendor_id, po.amount_cents, max(existing.billed_cents, po.billed_cents))
+                po = PurchaseOrder(po.number, po.vendor_id, po.amount_cents, existing.billed_cents)
             pos.append(po)
         except ValueError as exc:
             errors.append(f"line {n}: {exc}")

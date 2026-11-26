@@ -107,6 +107,12 @@ def test_allowed_accounts_list(gw, clock):
     first = verify(pub, gw.allowed_accounts("cfo@acme.com"), "allowed_accounts", clock.now)
     second = verify(pub, gw.allowed_accounts("cfo@acme.com"), "allowed_accounts", clock.now)
     assert (first["version"], second["version"]) == (1, 2)
+    # Loaded vendors have not been through a bank-change call. The list says so.
+    assert second["accounts"] and all(a["confirmed_by_call"] is False for a in second["accounts"])
+    gw.org.store.set_bank("V1", ACCT, date(2026, 11, 1))
+    third = verify(pub, gw.allowed_accounts("cfo@acme.com"), "allowed_accounts", clock.now)
+    by_id = {a["vendor_id"]: a for a in third["accounts"]}
+    assert by_id["V1"]["confirmed_by_call"] is True and by_id["V2"]["confirmed_by_call"] is False
     ins = [{"line": 1, "amount_cents": 5_00, "account": ACCT, "vendor_id": "V1"},
            {"line": 2, "amount_cents": 5_00, "account": "GB33BUKB20201555555555"},
            {"line": 3, "amount_cents": 5_00, "account": ACCT, "vendor_id": "V2"}]  # right account, wrong vendor

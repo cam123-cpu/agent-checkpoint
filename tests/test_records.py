@@ -344,6 +344,9 @@ def test_po_import_cannot_move_or_raise_an_existing_po(site):
     assert len(errors) == 2 and "another vendor" in errors[0] and "go up" in errors[1]
     assert store.po("PO-1").vendor_id == "V1" and store.po("PO-1").amount_cents == 40_000_00
     assert store.po("PO-9").vendor_id == "V2"
+    n, errors = import_pos(store, "PO number,Vendor,Amount,Billed\nPO-1,Northwind Supplies,40000.00,1000.00\n")
+    assert n == 0 and any("billed" in e for e in errors)
+    assert store.po("PO-1").billed_cents == 0
 
 
 def test_vendor_added_later_without_a_date_is_new(tmp_path):
