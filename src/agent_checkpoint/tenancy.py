@@ -29,6 +29,7 @@ from dataclasses import replace
 from .accounts import Accounts, User
 from .gateway import Gateway, Org
 from .intel import Intel
+from .journal import Journal
 from .ledger import Ledger
 from .notify import ConsoleNotifier, WebhookNotifier
 from .policy import AgentScope, Policy
@@ -280,7 +281,7 @@ class Registry:
                     notifier = WebhookNotifier(cfg["webhook_url"], cfg.get("approve_url", ""))
             with open(os.path.join(d, "policy.json")) as f:
                 policy = Policy.from_json(f.read())
-            org = Org(org_id, meta["name"], store, Ledger(os.path.join(d, "ledger.db"), ledger_key), policy,
+            org = Org(org_id, meta["name"], store, Journal(Ledger(os.path.join(d, "ledger.db"), ledger_key), store), policy,
                       signer, SandboxRail(store, Verifier(signer.public_pem())), notifier, None)
         org.intel = self.intel()
         gw = Gateway(org)

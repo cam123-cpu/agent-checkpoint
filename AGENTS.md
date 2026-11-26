@@ -29,6 +29,9 @@ This code decides whether money moves. Read this before changing anything.
 | A refund's destination is bound to its ticket; a new pause at final approval sends it back, never pays | `test_refund_destination_is_bound_to_the_ticket`, `test_a_new_pause_reopens_the_ticket_instead_of_paying` |
 | Imports never change an existing vendor's bank account | `test_PT16_*`, `test_vendor_add_edit_and_no_bank_edit` |
 | Bank changes need a *different* person and a call to the number on file, typed in and recorded | `test_bank_change_requested_in_the_app_needs_another_person_and_a_call`, `test_bank_change_approval_records_the_number_dialled` |
+| A vendor's phone or email domains change only when a second person approves; bank changes wait while one is pending and for 14 days after | `test_PT26_one_admin_repoints_the_callback_number`, `test_PT27_*`, `test_PT28_*` |
+| A release pays a line only to the account the file was checked against; one release per run; list versions go up by one | `test_PT22_*`, `test_PT23_*`, `test_PT24_*` |
+| Audit-log entries commit with the books and reach the log exactly once, even after a crash | `test_journal.py` |
 | Imports never move a purchase order to another vendor or raise its amount | `test_po_import_cannot_move_or_raise_an_existing_po` |
 | The person who asked can't approve; large payments need two people | `test_only_approvers_and_never_the_requester`, `test_dual_approval_needs_two_different_people` |
 | A failing check blocks (fail closed); unanswered tickets expire | `test_check_failure_fails_closed`, `test_unanswered_tickets_expire_fail_closed` |

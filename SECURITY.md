@@ -51,12 +51,21 @@ user in a locked-down systemd sandbox with its keys outside the data folder.
 `deploy/external_check.py` checks a deployed server from the outside (TLS, headers, CSRF, auth on
 every API, path probing, open ports, sign-in limits); it runs against a real HTTPS server in CI.
 
+## Contact details and the audit log
+
+A vendor's phone number is what bank changes are confirmed against, and its email domains decide who
+counts as the vendor, so neither can be changed by one person: a change is a request that someone else
+approves, and bank changes for that vendor wait 14 days after it. Audit-log entries made while the books
+change are committed with the books (an outbox) and copied to the tamper-evident log once, so the two can
+never disagree after a crash.
+
 ## Penetration test
 
 A pen test on 16 November 2026 ran 30 attacks against a live server. 13 succeeded at first,
 including 5 rated high (most important: a payment approved for one account could be paid to
 another, and a CSV import could change where a vendor is paid). All 13 are fixed, and every attack
-is kept as a regression test. Report: [docs/PENTEST.md](docs/PENTEST.md).
+is kept as a regression test. A second round on 25 November 2026 attacked the features added since
+(14 attacks, 5 succeeded at first, all fixed). Report: [docs/PENTEST.md](docs/PENTEST.md).
 
 That test was run by the same team that wrote the code, against the code. An independent test of a
 deployed server is planned before any company's money depends on enforce mode; how to scope it is in

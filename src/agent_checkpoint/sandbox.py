@@ -6,6 +6,7 @@ import secrets
 
 from .gateway import Gateway, Org, utcnow
 from .intel import Intel
+from .journal import Journal
 from .ledger import Ledger
 from .notify import CollectingNotifier
 from .policy import Policy
@@ -18,7 +19,7 @@ def make_org(org_id: str = "acme", name: str = "Acme Manufacturing", policy: Pol
              intel: Intel | None = None, clock=utcnow) -> Gateway:
     store = Store(":memory:", secrets.token_bytes(32))
     signer = Signer.generate(org_id)
-    org = Org(org_id, name, store, Ledger(":memory:", secrets.token_bytes(32)), policy or Policy(), signer,
+    org = Org(org_id, name, store, Journal(Ledger(":memory:", secrets.token_bytes(32)), store), policy or Policy(), signer,
               SandboxRail(store, Verifier(signer.public_pem())), CollectingNotifier(), intel)
     return Gateway(org, clock=clock)
 

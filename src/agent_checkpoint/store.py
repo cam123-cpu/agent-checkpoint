@@ -134,6 +134,8 @@ class Store:
         self.crypto = Crypto(key)
         self._lock = threading.RLock()
         self._depth = 0
+        self._scratch = False
+        self._on_commit: list = []
         self.db = sqlite3.connect(path, check_same_thread=False, isolation_level=None, timeout=10)
         self.db.execute("PRAGMA busy_timeout = 10000")
         self.db.executescript(SCHEMA)
@@ -147,6 +149,8 @@ class Store:
             self.db.execute("ALTER TABLE tickets ADD COLUMN payee_fp TEXT NOT NULL DEFAULT ''")
         if "contact_changed_on" not in {r[1] for r in self.db.execute("PRAGMA table_info(vendors)")}:
             self.db.execute("ALTER TABLE vendors ADD COLUMN contact_changed_on TEXT")
+        self.db.execute("CREATE TABLE IF NOT EXISTS outbox (seq INTEGER PRIMARY KEY AUTOINCREMENT, uid TEXT NOT NULL "
+                        "UNIQUE, kind TEXT NOT NULL, request_id TEXT NOT NULL, body TEXT NOT NULL)")
         self.db.execute("""CREATE TABLE IF NOT EXISTS contact_changes (
             change_id TEXT PRIMARY KEY, vendor_id TEXT NOT NULL, phone TEXT NOT NULL, email_domains TEXT NOT NULL,
             requested_by TEXT NOT NULL, requested_at TEXT NOT NULL, note TEXT NOT NULL DEFAULT '',
@@ -162,14 +166,22 @@ class Store:
             self._depth += 1
             try:
                 yield self
-                self._depth -= 1
-                if outer:
-                    self.db.execute("COMMIT")
             except BaseException:
                 self._depth -= 1
                 if outer:
                     self.db.execute("ROLLBACK")
                 raise
+            self._depth -= 1
+            if outer:
+                self.db.execute("COMMIT")
+                # Still holding the lock: whatever was queued in the outbox reaches the audit log before any other
+                # request can read it. If that fails, the entries stay in the outbox (committed with the books) and
+                # go out on the next commit or the next start.
+                for fn in self._on_commit:
+                    try:
+                        fn()
+                    except Exception:  # noqa: BLE001
+                        pass
 
     @contextmanager
     def scratch(self):
@@ -179,11 +191,30 @@ class Store:
                 raise RuntimeError("scratch() can't run inside another transaction")
             self.db.execute("BEGIN IMMEDIATE")
             self._depth += 1
+            self._scratch = True
             try:
                 yield self
             finally:
                 self._depth -= 1
+                self._scratch = False
                 self.db.execute("ROLLBACK")
+
+    @property
+    def queues_log(self) -> bool:
+        """Inside a real transaction: log entries go to the outbox and commit with the books."""
+        return self._depth > 0 and not self._scratch
+
+    def outbox_add(self, uid: str, kind: str, request_id: str, body: str) -> None:
+        self.db.execute("INSERT INTO outbox (uid, kind, request_id, body) VALUES (?, ?, ?, ?)",
+                        (uid, kind, request_id, body))
+
+    def outbox(self) -> list[tuple[str, str, str, str]]:
+        with self._lock:
+            return self.db.execute("SELECT uid, kind, request_id, body FROM outbox ORDER BY seq").fetchall()
+
+    def outbox_done(self, uid: str) -> None:
+        with self._lock:
+            self.db.execute("DELETE FROM outbox WHERE uid = ?", (uid,))
 
     def q(self, sql: str, params=()) -> list[tuple]:
         with self._lock:
