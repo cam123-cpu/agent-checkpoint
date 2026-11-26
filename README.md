@@ -276,7 +276,7 @@ for the design.
 
 ```bash
 pip install -e ".[dev]"
-pytest -q          # 239 tests, plus a real browser when Playwright is installed: checks, approvals, receipts,
+pytest -q          # 256 tests, plus a real browser when Playwright is installed: checks, approvals, receipts,
                    # ledger tampering, network, MCP (incl. a real stdio process), HTTP, CLI, quality bar,
                    # the security checklist, and design rules
 ruff check src tests scripts

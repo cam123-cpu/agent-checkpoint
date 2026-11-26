@@ -175,9 +175,18 @@ def vendors(gw) -> list[dict]:
     for p in gw.org.store.payments(kind="pay"):
         paid[p.vendor_id] += p.amount_cents
         count[p.vendor_id] += 1
+    pending = {c["vendor_id"]: c for c in gw.org.store.contact_changes("open")}
+
+    def change(v):
+        c = pending.get(v.vendor_id)
+        return None if c is None else {"change_id": c["change_id"], "phone": c["phone"],
+                                       "email_domains": list(c["email_domains"]), "requested_by": c["requested_by"],
+                                       "requested_at": c["requested_at"]}
     return [{"vendor_id": v.vendor_id, "name": v.name, "account_on_file": last4(v.bank_account),
              "email_domains": list(v.email_domains), "phone": v.phone,
              "bank_changed_on": v.bank_changed_on.isoformat() if v.bank_changed_on else "",
+             "contact_changed_on": v.contact_changed_on.isoformat() if v.contact_changed_on else "",
+             "pending_contact_change": change(v),
              "payments": count[v.vendor_id], "paid_cents": paid[v.vendor_id]} for v in gw.org.store.vendors()]
 
 

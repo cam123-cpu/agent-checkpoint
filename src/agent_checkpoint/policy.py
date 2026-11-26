@@ -47,6 +47,7 @@ class Policy:
     approvers: tuple[str, ...] = ()
     internal_domains: tuple[str, ...] = ()       # your own mail domains (forwarded invoices)
     require_two_step: bool = False               # everyone signing in with a password needs an authenticator code
+    contact_cooldown_days: int = 14              # no bank change for this long after a vendor's phone or domains change
     release_hours: int = 24                      # a checked payment file must be released within this, or re-checked
     allowed_list_days: int = 7                   # a partner stops accepting an allowed-accounts list after this
     pilot_hold_limit_pct: float = 15.0           # more ordinary lines held than this: the checks don't fit the books

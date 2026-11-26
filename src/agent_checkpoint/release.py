@@ -124,6 +124,9 @@ def check_release(body: dict, file_bytes: bytes | None = None, instructions: lis
         pool = list(body["release"])
         ok = []
         for ins in instructions:
+            if not norm_account(ins.get("account", "")):
+                result["unmatched"].append(ins["line"])  # no account: nothing can be checked
+                continue
             tag = account_tag(body["salt"], ins.get("account", ""))
             hit = next((r for r in pool if r["amount_cents"] == ins["amount_cents"] and r["account_tag"] == tag
                         and (not ins.get("vendor_id") or ins["vendor_id"] == r["vendor_id"])), None)
@@ -146,7 +149,8 @@ def check_allowed(body: dict, instructions: list[dict], min_version: int = 0) ->
         by_tag.setdefault(a["account_tag"], set()).add(a["vendor_id"])
     allowed, refused = [], []
     for ins in instructions:
-        vendors = by_tag.get(account_tag(body["salt"], ins.get("account", "")))
+        vendors = by_tag.get(account_tag(body["salt"], ins.get("account", ""))) if norm_account(
+            ins.get("account", "")) else None
         good = bool(vendors) and (not ins.get("vendor_id") or ins["vendor_id"] in vendors)
         (allowed if good else refused).append(ins["line"])
     return {"list_id": body["list_id"], "version": body["version"], "allowed_lines": allowed,

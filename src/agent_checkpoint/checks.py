@@ -451,6 +451,16 @@ def check_bank_change(req, ctx):
                                      "and confirm before approving", 0.6)]
     if norm_account(req.bank_account) == norm_account(v.bank_account):
         return [Finding("bank_change_noop", B, "That is already the account on file", 0.3)]
+    # The call to the number on file is the control. If that number (or the vendor's email domains) changed
+    # recently, or a change is waiting, the call would go to whoever changed it.
+    if ctx.store.contact_changes("open", v.vendor_id):
+        out.append(Finding("contact_change_pending", B, f"A change to {v.name}'s phone or email domains is waiting "
+                                                        "for approval. Decide that first.", 0.9))
+    cool = ctx.policy.contact_cooldown_days
+    if v.contact_changed_on and (req.on - v.contact_changed_on).days < cool:
+        out.append(Finding("contact_recently_changed", B, f"{v.name}'s phone or email domains changed on "
+                                                          f"{v.contact_changed_on.isoformat()}. A bank change can't be "
+                                                          f"confirmed by phone until {cool} days after that.", 0.9))
     shared = ctx.store.vendor_using_account(req.bank_account, v.vendor_id)
     if shared:
         out.append(Finding("shared_account", B, f"Account {last4(req.bank_account)} already belongs to another "

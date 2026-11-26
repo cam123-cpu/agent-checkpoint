@@ -626,11 +626,24 @@ def make_server(registry: Registry, host: str = "127.0.0.1", port: int = 8077, c
                 if v is None:
                     raise HTTPError(404, "no such vendor")
                 name = str(b.get("name", v.name)).strip()[:200] or v.name
-                domains = _domains(str(b["email_domains"])) if "email_domains" in b else v.email_domains
-                gw.org.store.upsert_vendor(Vendor(v.vendor_id, name, v.bank_account, domains, v.created_on,
-                                                  v.bank_changed_on, str(b.get("phone", v.phone))[:40]))
-                gw.org.ledger.append("records", "-", {"by": user.email, "event": "vendor details edited", "vendor": vid,
-                                                      "fields": sorted(b)})
+                if name != v.name:
+                    gw.org.store.upsert_vendor(replace(v, name=name))
+                    gw.org.ledger.append("records", "-", {"by": user.email, "event": "vendor renamed", "vendor": vid})
+                # Phone and email domains are what bank changes are checked against, so they change only when
+                # someone else approves.
+                phone = str(b["phone"])[:40].strip() if "phone" in b else None
+                domains = _domains(str(b["email_domains"])) if "email_domains" in b else None
+                pending = None
+                if (phone is not None and phone != v.phone) or (domains is not None and set(domains) != set(v.email_domains)):
+                    pending = gw.request_contact_change(vid, user.email, phone=phone, email_domains=domains)
+                return self._json(200, {"vendors": views.vendors(gw), "contact_change": pending})
+            cc = re.fullmatch(r"contact-changes/(CC-[0-9a-f]{12})", route)
+            if cc and m == "POST":
+                self._user("admin", "approver")
+                b = self._body({"approve", "note"})
+                if not isinstance(b.get("approve"), bool):
+                    raise HTTPError(422, "approve must be true or false")
+                gw.decide_contact_change(cc.group(1), user.email, b["approve"], str(b.get("note", ""))[:300])
                 return self._json(200, {"vendors": views.vendors(gw)})
             if route == "pos" and m == "POST":
                 self._user("admin")

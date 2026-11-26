@@ -41,6 +41,8 @@ CREATE TRIGGER IF NOT EXISTS ledger_no_update BEFORE UPDATE ON ledger
     BEGIN SELECT RAISE(ABORT, 'ledger is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS ledger_no_delete BEFORE DELETE ON ledger
     BEGIN SELECT RAISE(ABORT, 'ledger is append-only'); END;
+-- Which outbox entries are already in the log, so a flush interrupted by a crash never adds one twice.
+CREATE TABLE IF NOT EXISTS ledger_uids (uid TEXT PRIMARY KEY, hash TEXT NOT NULL);
 """
 
 
@@ -63,10 +65,16 @@ class Ledger:
         sig = hmac.new(self._key, digest.encode(), hashlib.sha256).hexdigest()
         return digest, sig
 
-    def append(self, kind: str, request_id: str, body: dict) -> str:
+    def append(self, kind: str, request_id: str, body: dict, *, uid: str = "") -> str:
+        """Add an entry. With `uid` (from the books' outbox), appending the same entry twice adds it once."""
         with self._lock:
             self._db.execute("BEGIN IMMEDIATE")
             try:
+                if uid:
+                    seen = self._db.execute("SELECT hash FROM ledger_uids WHERE uid = ?", (uid,)).fetchone()
+                    if seen:
+                        self._db.execute("COMMIT")
+                        return seen[0]
                 row = self._db.execute("SELECT hash FROM ledger ORDER BY seq DESC LIMIT 1").fetchone()
                 prev = row[0] if row else GENESIS
                 at = datetime.now(UTC).isoformat(timespec="microseconds")
@@ -75,6 +83,8 @@ class Ledger:
                 self._db.execute(
                     "INSERT INTO ledger (at, kind, request_id, body, prev_hash, hash, sig) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?)", (at, kind, request_id, text, prev, digest, sig))
+                if uid:
+                    self._db.execute("INSERT INTO ledger_uids (uid, hash) VALUES (?, ?)", (uid, digest))
                 self._db.execute("COMMIT")
             except BaseException:
                 self._db.execute("ROLLBACK")

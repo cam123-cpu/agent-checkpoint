@@ -703,8 +703,30 @@
         bank.addEventListener("click", () => openPanel(bankChangeForm(v)));
         actions.append(bank);
       }
+      const cc = v.pending_contact_change;
+      let waiting = null;
+      if (cc) {
+        const what = [];
+        if (cc.phone !== v.phone) what.push("phone to " + (cc.phone || "none"));
+        if (cc.email_domains.join(",") !== v.email_domains.join(",")) what.push("email domains to " + (cc.email_domains.join(", ") || "none"));
+        waiting = h("div", { class: "notice" }, h("span", { text: cc.requested_by + " asked to change " + what.join(" and ") + ". " }));
+        if (canRequest && cc.requested_by.toLowerCase() !== state.me.email.toLowerCase()) {
+          for (const [label, ok] of [["Approve change", true], ["Reject", false]]) {
+            const btn = h("button", { type: "button", class: ok ? "" : "secondary" }, label);
+            btn.addEventListener("click", async () => {
+              btn.disabled = true;
+              try { await api.post("contact-changes/" + cc.change_id, { approve: ok }); toast(ok ? "Change approved" : "Change rejected"); render(); }
+              catch (e) { toast(e.message); btn.disabled = false; }
+            });
+            waiting.append(btn);
+          }
+          waiting.append(h("p", { class: "small muted", text: "Check it with the vendor using the details on file now, not the new ones. After a change, bank changes for this vendor wait " + (state.me.contact_cooldown_days || 14) + " days." }));
+        } else {
+          waiting.append(h("span", { class: "muted", text: "Someone else needs to approve it." }));
+        }
+      }
       body.append(h("tr", {},
-        h("td", {}, h("strong", { text: v.name }), h("div", { class: "muted", text: v.vendor_id })),
+        h("td", {}, h("strong", { text: v.name }), h("div", { class: "muted", text: v.vendor_id }), waiting),
         h("td", { text: v.account_on_file }), h("td", { text: v.email_domains.join(", ") || "None" }),
         h("td", { text: v.bank_changed_on ? dateText(v.bank_changed_on) : "Never" }),
         h("td", { class: "num", text: String(v.payments) }), h("td", { class: "num", text: money(v.paid_cents) }),
@@ -729,11 +751,11 @@
     return h("form", { novalidate: true, onsubmit: async (ev) => {
       ev.preventDefault();
       try {
-        await api.post("vendors/" + encodeURIComponent(v.vendor_id), { name: name.value, email_domains: domains.value, phone: phone.value });
-        toast("Vendor saved"); render();
+        const out = await api.post("vendors/" + encodeURIComponent(v.vendor_id), { name: name.value, email_domains: domains.value, phone: phone.value });
+        toast(out.contact_change ? "Saved. The phone or email change needs another person to approve it." : "Vendor saved"); render();
       } catch (e) { showMessage(msg, false, e.message); }
     } }, field(name.id, "Name", name), field(domains.id, "Email domains", domains, "Separate with commas, e.g. northwind.com, northwind-billing.com"),
-      field(phone.id, "Phone number for confirming bank changes", phone),
+      field(phone.id, "Phone number for confirming bank changes", phone, "Changes to the phone or email domains take effect when someone else approves them."),
       h("p", { class: "small muted", text: "The bank account can't be edited here. Use Change bank account." }),
       h("div", { class: "row" }, h("button", { type: "submit" }, "Save vendor")), msg);
   }
