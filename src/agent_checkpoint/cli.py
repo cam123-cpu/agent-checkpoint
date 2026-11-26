@@ -337,6 +337,20 @@ def cmd_usage(args) -> int:
     return 0
 
 
+def cmd_contact_change(args) -> int:
+    gw = _registry(args).gateway(args.org)
+    domains = tuple(d.strip() for d in args.domains.split(",") if d.strip()) if args.domains is not None else None
+    print(json.dumps(gw.request_contact_change(args.vendor, args.as_, phone=args.phone, email_domains=domains,
+                                               note=args.note), indent=2))
+    return 0
+
+
+def cmd_decide_contact(args) -> int:
+    gw = _registry(args).gateway(args.org)
+    print(json.dumps(gw.decide_contact_change(args.change, args.as_, args.approve, args.note), indent=2))
+    return 0
+
+
 def cmd_move_keys(args) -> int:
     for path in _registry(args).move_secrets():
         print("moved", path)
@@ -474,6 +488,14 @@ def build_parser() -> argparse.ArgumentParser:
         if name == "evidence":
             s.add_argument("--json", action="store_true")
         s.set_defaults(fn=fn)
+    s = sub.add_parser("contact-change", help="ask to change a vendor's phone or email domains (someone else approves)")
+    s.add_argument("org"); s.add_argument("vendor"); s.add_argument("--as", dest="as_", required=True)
+    s.add_argument("--phone"); s.add_argument("--domains", help="comma-separated"); s.add_argument("--note", default="")
+    s.set_defaults(fn=cmd_contact_change)
+    for name, approve in (("approve-contact", True), ("reject-contact", False)):
+        s = sub.add_parser(name); s.add_argument("org"); s.add_argument("change")
+        s.add_argument("--as", dest="as_", required=True); s.add_argument("--note", default="")
+        s.set_defaults(fn=cmd_decide_contact, approve=approve)
     sub.add_parser("move-keys", help="move every secret out of the data folder into --keys").set_defaults(fn=cmd_move_keys)
     sub.add_parser("doctor", help="checks before a pilot: keys, mode, ledger").set_defaults(fn=cmd_doctor)
     s = sub.add_parser("withdraw-report", help="take back your company's fraud report for a request")

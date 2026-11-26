@@ -207,7 +207,8 @@ def import_vendors(store: Store, text: str) -> tuple[int, list[str]]:
                 domains, phone = _domains(r.get("email_domains", "")), r.get("phone", "").strip()[:40]
             vendors.append(Vendor(vid, r["name"][:200], r["bank_account"][:64], domains,
                                   existing.created_on if existing else created,
-                                  existing.bank_changed_on if existing else None, phone))
+                                  existing.bank_changed_on if existing else None, phone,
+                                  existing.contact_changed_on if existing else None))
         except ValueError as exc:
             errors.append(f"line {n}: {exc}")
     with store.tx():

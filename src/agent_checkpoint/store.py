@@ -96,6 +96,7 @@ class Vendor:
     created_on: date
     bank_changed_on: date | None = None
     phone: str = ""
+    contact_changed_on: date | None = None   # phone or email domains last changed (by a second person)
 
 
 @dataclass
@@ -144,6 +145,13 @@ class Store:
         self.db.executescript(PAYMENTS_DDL)
         if "payee_fp" not in {r[1] for r in self.db.execute("PRAGMA table_info(tickets)")}:
             self.db.execute("ALTER TABLE tickets ADD COLUMN payee_fp TEXT NOT NULL DEFAULT ''")
+        if "contact_changed_on" not in {r[1] for r in self.db.execute("PRAGMA table_info(vendors)")}:
+            self.db.execute("ALTER TABLE vendors ADD COLUMN contact_changed_on TEXT")
+        self.db.execute("""CREATE TABLE IF NOT EXISTS contact_changes (
+            change_id TEXT PRIMARY KEY, vendor_id TEXT NOT NULL, phone TEXT NOT NULL, email_domains TEXT NOT NULL,
+            requested_by TEXT NOT NULL, requested_at TEXT NOT NULL, note TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'approved', 'rejected')),
+            decided_by TEXT, decided_at TEXT)""")
 
     @contextmanager
     def tx(self):
@@ -183,7 +191,8 @@ class Store:
 
     def _vendor(self, r) -> Vendor:
         return Vendor(r[0], r[1], self.crypto.decrypt(r[2], f"vendors.bank:{r[0]}"), tuple(json.loads(r[3])),
-                      date.fromisoformat(r[4]), date.fromisoformat(r[5]) if r[5] else None, r[6])
+                      date.fromisoformat(r[4]), date.fromisoformat(r[5]) if r[5] else None, r[6],
+                      date.fromisoformat(r[7]) if len(r) > 7 and r[7] else None)
 
     def _payment(self, r) -> Payment:
         return Payment(r[0], r[1], r[2], r[3], r[4], self.crypto.decrypt(r[5], f"payments.bank:{r[0]}"),
@@ -192,12 +201,44 @@ class Store:
     # --- vendor master and POs -----------------------------------------------------------
 
     def upsert_vendor(self, v: Vendor) -> None:
-        self.q("INSERT INTO vendors VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (vendor_id) DO UPDATE SET "
+        self.q("INSERT INTO vendors (vendor_id, name, bank_account, email_domains, created_on, bank_changed_on, phone, "
+               "contact_changed_on) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (vendor_id) DO UPDATE SET "
                "name = excluded.name, bank_account = excluded.bank_account, email_domains = excluded.email_domains, "
-               "bank_changed_on = excluded.bank_changed_on, phone = excluded.phone",
+               "bank_changed_on = excluded.bank_changed_on, phone = excluded.phone, "
+               "contact_changed_on = excluded.contact_changed_on",
                (v.vendor_id, v.name, self.crypto.encrypt(v.bank_account, f"vendors.bank:{v.vendor_id}"),
                 json.dumps([d.lower() for d in v.email_domains]),
-                v.created_on.isoformat(), v.bank_changed_on.isoformat() if v.bank_changed_on else None, v.phone))
+                v.created_on.isoformat(), v.bank_changed_on.isoformat() if v.bank_changed_on else None, v.phone,
+                v.contact_changed_on.isoformat() if v.contact_changed_on else None))
+
+    # --- contact changes: the phone on file is what bank changes are confirmed against -----
+
+    def add_contact_change(self, change_id: str, vendor_id: str, phone: str, domains: tuple[str, ...],
+                           requested_by: str, at: str, note: str = "") -> None:
+        self.q("INSERT INTO contact_changes (change_id, vendor_id, phone, email_domains, requested_by, requested_at, "
+               "note) VALUES (?, ?, ?, ?, ?, ?, ?)",
+               (change_id, vendor_id, phone, json.dumps(list(domains)), requested_by, at, note))
+
+    def contact_changes(self, status: str | None = "open", vendor_id: str | None = None) -> list[dict]:
+        sql, args = "SELECT * FROM contact_changes WHERE 1 = 1", []
+        if status:
+            sql, args = sql + " AND status = ?", [*args, status]
+        if vendor_id:
+            sql, args = sql + " AND vendor_id = ?", [*args, vendor_id]
+        cols = ("change_id", "vendor_id", "phone", "email_domains", "requested_by", "requested_at", "note", "status",
+                "decided_by", "decided_at")
+        out = [dict(zip(cols, r, strict=True)) for r in self.q(sql + " ORDER BY requested_at", tuple(args))]
+        for c in out:
+            c["email_domains"] = tuple(json.loads(c["email_domains"]))
+        return out
+
+    def decide_contact_change(self, change_id: str, status: str, by: str, at: str) -> None:
+        self.q("UPDATE contact_changes SET status = ?, decided_by = ?, decided_at = ? WHERE change_id = ? "
+               "AND status = 'open'", (status, by, at, change_id))
+
+    def open_bank_change(self, vendor_id: str) -> dict | None:
+        return next((t for t in self.tickets("open") if t["request"]["action"] == "change_bank"
+                     and t["request"]["vendor_id"] == vendor_id), None)
 
     def vendor(self, vendor_id: str) -> Vendor | None:
         rows = self.q("SELECT * FROM vendors WHERE vendor_id = ?", (vendor_id,))

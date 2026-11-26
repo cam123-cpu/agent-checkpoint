@@ -22,7 +22,7 @@ import re
 import time
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 
 from .checks import Context, _sender_strings, domain_of, evaluate, learned_weights
@@ -235,10 +235,64 @@ class Gateway:
             "run_id": run_id, "by": person, "checked_at": now.isoformat(), "file_sha256": file_sha256,
             "rows": len(rows), "summary": summary,
             "not_ready_pct": pilot["not_ready_pct"],
-            "lines": [{k: r[k] for k in ("line", "vendor_id", "vendor_name", "invoice_number", "amount_cents",
-                                         "account_in_file", "verdict", "risk", "reasons")} for r in shown],
+            "lines": [{**{k: r[k] for k in ("line", "vendor_id", "vendor_name", "invoice_number", "amount_cents",
+                                            "account_in_file", "verdict", "risk", "reasons")},
+                       # The account the line was checked against (keyed fingerprint). A release pays only this.
+                       "account_fp": self._vendor_fp(r["vendor_id"])} for r in shown],
         })
         return {"run_id": run_id, "rows": shown, "summary": summary, "pilot": pilot}
+
+    # --- contact details: the phone on file is what bank changes are confirmed against ---
+
+    def request_contact_change(self, vendor_id: str, person: str, *, phone: str | None = None,
+                               email_domains: tuple[str, ...] | None = None, note: str = "") -> dict:
+        """Ask to change a vendor's phone or email domains. Someone else approves it; nothing changes until then.
+
+        Bank changes are confirmed by calling the number on file and trusted senders come from the domains, so
+        one person changing those would undo both controls."""
+        org, now = self.org, self.clock()
+        with org.store.tx():
+            v = org.store.vendor(vendor_id)
+            if v is None:
+                raise CheckpointError(404, "no such vendor")
+            phone = v.phone if phone is None else phone.strip()[:40]
+            domains = v.email_domains if email_domains is None else tuple(sorted({d.lower() for d in email_domains}))
+            if phone == v.phone and set(domains) == set(v.email_domains):
+                raise CheckpointError(422, "nothing to change")
+            if org.store.contact_changes("open", vendor_id):
+                raise CheckpointError(409, "a contact change for this vendor is already waiting for approval")
+            if org.store.open_bank_change(vendor_id):
+                raise CheckpointError(409, "a bank change for this vendor is waiting. Decide it first, using the "
+                                           "number on file now.")
+            change_id = "CC-" + uuid.uuid4().hex[:12]
+            org.store.add_contact_change(change_id, vendor_id, phone, domains, person, now.isoformat(), note[:300])
+            org.ledger.append("contact_change_requested", change_id, {
+                "vendor_id": vendor_id, "by": person, "phone_changed": phone != v.phone,
+                "domains_before": list(v.email_domains), "domains_after": list(domains), "note": note[:300]})
+        return {"change_id": change_id, "status": "open"}
+
+    def decide_contact_change(self, change_id: str, person: str, approve: bool, note: str = "") -> dict:
+        org, now = self.org, self.clock()
+        if person not in org.policy.approvers:
+            raise CheckpointError(403, "only approvers can decide contact changes")
+        with org.store.tx():
+            c = next((x for x in org.store.contact_changes(None) if x["change_id"] == change_id), None)
+            if c is None:
+                raise CheckpointError(404, "no such contact change")
+            if c["status"] != "open":
+                raise CheckpointError(409, f"already {c['status']}")
+            if approve and c["requested_by"].lower() == person.lower():
+                raise CheckpointError(403, "someone other than the person who asked must approve it")
+            if approve and org.store.open_bank_change(c["vendor_id"]):
+                raise CheckpointError(409, "a bank change for this vendor is waiting. Decide it first.")
+            org.store.decide_contact_change(change_id, "approved" if approve else "rejected", person, now.isoformat())
+            if approve:
+                v = org.store.vendor(c["vendor_id"])
+                org.store.upsert_vendor(replace(v, phone=c["phone"], email_domains=c["email_domains"],
+                                                contact_changed_on=now.date()))
+            org.ledger.append("contact_change_decided", change_id, {
+                "vendor_id": c["vendor_id"], "by": person, "approved": approve, "note": note[:300]})
+        return {"change_id": change_id, "status": "approved" if approve else "rejected"}
 
     # --- in the path: documents a payment system can check -------------------------------
 
@@ -251,6 +305,16 @@ class Gateway:
         org, now = self.org, self.clock()
         if person not in org.policy.approvers:
             raise CheckpointError(403, "only approvers can release a payment file")
+        # Serialized on the books database, so two requests at once can't both find no release and both issue one.
+        with org.store.tx():
+            return self._release_run(run_id, person, now)
+
+    def _vendor_fp(self, vendor_id: str) -> str:
+        v = self.org.store.vendor(vendor_id)
+        return self.org.store.crypto.fingerprint(norm_account(v.bank_account)) if v and norm_account(v.bank_account) else ""
+
+    def _release_run(self, run_id: str, person: str, now: datetime) -> dict:
+        org = self.org
         run = org.ledger.find(run_id, "payment_run_checked")
         if run is None:
             raise CheckpointError(404, "no such payment run")
@@ -264,7 +328,10 @@ class Gateway:
         release, hold = [], []
         for line in sorted(run["lines"], key=lambda r: r["line"]):
             vendor = org.store.vendor(line["vendor_id"])
-            if line["verdict"] != "go" or vendor is None:
+            fp = self._vendor_fp(line["vendor_id"])
+            # Held: not Ready, no account, or the account on file is no longer the one this file was checked
+            # against (a bank change landed in between). That line needs a fresh check.
+            if line["verdict"] != "go" or vendor is None or not fp or fp != line.get("account_fp"):
                 hold.append(line["line"])
                 continue
             release.append({"line": line["line"], "vendor_id": line["vendor_id"], "invoice_number": line["invoice_number"],
@@ -292,6 +359,11 @@ class Gateway:
         org, now = self.org, self.clock()
         if person not in org.policy.approvers:
             raise CheckpointError(403, "only approvers can issue the allowed-accounts list")
+        with org.store.tx():
+            return self._allowed_accounts(person, now)
+
+    def _allowed_accounts(self, person: str, now: datetime) -> dict:
+        org = self.org
         version = len(org.ledger.entries("allowed_accounts_issued")) + 1
         salt = uuid.uuid4().hex
         accounts = [{"vendor_id": v.vendor_id, "vendor_name": v.name, "account_tag": account_tag(salt, v.bank_account),
