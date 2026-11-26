@@ -353,8 +353,9 @@ class Gateway:
     def allowed_accounts(self, person: str) -> dict:
         """The locked list of where this company pays, signed, for a bank or payment system to check against.
 
-        Every account on it was set by an import before go-live or by a bank change that a second person
-        approved after calling the number on file. Versions only go up; a partner keeps the newest it has seen.
+        An account is on the list because it is on file. `confirmed_by_call` is true only after a bank change
+        that a second person approved and that recorded the number on file. An import or a new vendor does not
+        set that flag. Versions only go up; a partner keeps the newest it has seen.
         """
         org, now = self.org, self.clock()
         if person not in org.policy.approvers:
@@ -367,7 +368,9 @@ class Gateway:
         version = len(org.ledger.entries("allowed_accounts_issued")) + 1
         salt = uuid.uuid4().hex
         accounts = [{"vendor_id": v.vendor_id, "vendor_name": v.name, "account_tag": account_tag(salt, v.bank_account),
-                     "account_last4": last4(v.bank_account)} for v in org.store.vendors() if norm_account(v.bank_account)]
+                     "account_last4": last4(v.bank_account),
+                     "confirmed_by_call": v.bank_changed_on is not None}
+                    for v in org.store.vendors() if norm_account(v.bank_account)]
         body = {"list_id": f"AL-{org.org_id}-{version}", "org_id": org.org_id, "company": org.name, "version": version,
                 "issued_at": now.isoformat(), "issued_by": person,
                 "expires_at": (now + timedelta(days=org.policy.allowed_list_days)).isoformat(),

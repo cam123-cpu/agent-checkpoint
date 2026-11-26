@@ -43,10 +43,12 @@ Issued by an approver after a payment file was checked. Fields that matter:
 
 ### Allowed accounts
 
-The company's locked list of where it pays. An account gets on it by the first import before go-live,
-or by a bank change that a second person approved after phoning the vendor on the number already on
-file. `version` only goes up. Keep the highest version you have seen and refuse older ones. The list
-expires (7 days by default), so a company that stops issuing it stops being able to pay.
+The company's list of accounts currently on file. `confirmed_by_call` is true only when that account was
+set by a bank change a second person approved after the number on file was recorded. An import, including
+the first load, and a vendor an admin adds, are on the list with `confirmed_by_call` false. Refuse those
+after go-live if your agreement says every destination must have been confirmed by a call. `version` only
+goes up. Keep the highest version you have seen and refuse older ones. The list expires (7 days by
+default), so a company that stops issuing it stops being able to pay.
 
 ### Account tags
 
